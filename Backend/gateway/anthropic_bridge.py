@@ -31,7 +31,7 @@ UPSTREAM_URL = os.getenv(
 UPSTREAM_KEY = os.getenv(
     "ANTHROPIC_BRIDGE_UPSTREAM_KEY",
     os.getenv("API_SERVER_KEY", os.getenv("OMNIROUTE_API_KEY", "")),
-)
+).strip()
 UPSTREAM_MODEL = os.getenv("ANTHROPIC_BRIDGE_UPSTREAM_MODEL", "antigravity/gemini-3.6-flash-medium")
 DEFAULT_APP_MODEL = os.getenv("HERMES_ANTHROPIC_MODEL", "hermes-agent")
 
@@ -202,7 +202,7 @@ async def stream_upstream(payload: dict, requested_model: Optional[str] = None, 
                         "POST",
                         url,
                         headers={
-                            "Authorization": f"Bearer {UPSTREAM_KEY}",
+                            **({"Authorization": f"Bearer {UPSTREAM_KEY}"} if UPSTREAM_KEY else {}),
                             "Content-Type": "application/json",
                         },
                         json=payload_copy,
