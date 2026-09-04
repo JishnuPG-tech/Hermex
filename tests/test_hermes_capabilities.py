@@ -9,6 +9,7 @@ TERMINAL = ROOT / "hermes_core" / "tools" / "terminal_tools.py"
 REGISTRY = ROOT / "hermes_core" / "tools" / "registry.py"
 AGENT = ROOT / "hermes_core" / "agent.py"
 DOCKERFILE = ROOT / "Dockerfile"
+WEBUI = ROOT / "gateway" / "webui_api.py"
 
 
 class HermesServerCapabilityTests(unittest.TestCase):
@@ -45,6 +46,10 @@ class HermesServerCapabilityTests(unittest.TestCase):
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
         self.assertIn("    git \\", dockerfile)
         self.assertIn("HERMES_SERVER_WORKDIR=/app", dockerfile)
+
+    def test_stream_storage_is_recreated_at_point_of_use(self):
+        source = WEBUI.read_text(encoding="utf-8")
+        self.assertIn("_STREAMS_DIR.mkdir(parents=True, exist_ok=True)", source)
 
 
 if __name__ == "__main__":
