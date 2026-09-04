@@ -107,7 +107,10 @@ async def health_check():
         except Exception as e:
             services[name] = {"status": "starting", "message": str(e)}
     await client.aclose()
-    return JSONResponse({"gateway": "healthy", "upstreams": services})
+    # Hermex Android treats a 200 response as valid only when the decoded
+    # HealthResponse has status == "ok". Keep the existing diagnostics while
+    # exposing the compatibility field expected by the fixed client.
+    return JSONResponse({"status": "ok", "gateway": "healthy", "upstreams": services})
 
 
 # ── PWA Manifest & Static Assets ───────────────────────────────
