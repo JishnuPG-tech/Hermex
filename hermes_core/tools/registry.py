@@ -71,7 +71,13 @@ class ToolRegistry:
             selected_categories.add("web")
 
         # Coding / execution intent
-        if any(w in p for w in ["code", "python", "bash", "execute", "run", "script", "terminal", "calculate", "math", "program", "debug"]):
+        if any(w in p for w in [
+            "code", "python", "bash", "execute", "run", "script", "terminal",
+            "shell", "server", "calculate", "math", "program", "debug",
+            "install", "package", "apt", "pip", "npm", "git", "clone", "pull",
+            "push", "commit", "repo", "repository", "file", "read", "write",
+            "edit", "delete", "deploy", "build", "process", "log",
+        ]):
             selected_categories.add("coding")
 
         # Obsidian vault / notes intent
