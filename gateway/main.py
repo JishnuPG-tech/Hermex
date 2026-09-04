@@ -52,17 +52,6 @@ async def normalize_hermes_paths(request: Request, call_next):
     request.scope["path"] = cleaned_path
     return await call_next(request)
 
-# Order matters: exact routes BEFORE catch-all proxy
-app.include_router(telemetry_router)
-app.include_router(anthropic_router)
-app.include_router(v1_sessions_router)  # v1 Sessions & Code API - MUST be before hermes_proxy catch-all
-# Additive Hermex/WebUI surface. Keep this before legacy /api/models aliases.
-app.include_router(webui_router)
-app.include_router(claude_rest_router)
-app.include_router(omniroute_router)
-app.include_router(ignis_router)
-app.include_router(hermes_proxy_router)  # Catch-all proxy for /v1/* and /health/*
-
 @app.on_event("startup")
 async def on_startup():
     try:
@@ -203,6 +192,19 @@ async def logs_service(service: str):
     except Exception as e:
         content = f"(error: {e})"
     return HTMLResponse(f"<pre style='font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px'>{content}</pre>")
+
+
+# Register routers after the gateway's exact health/static/log routes so the
+# legacy /health catch-all cannot shadow them. Keep WebUI before the legacy
+# /api/models aliases and Hermes proxy last.
+app.include_router(telemetry_router)
+app.include_router(anthropic_router)
+app.include_router(v1_sessions_router)
+app.include_router(webui_router)
+app.include_router(claude_rest_router)
+app.include_router(omniroute_router)
+app.include_router(ignis_router)
+app.include_router(hermes_proxy_router)
 
 @app.on_event("startup")
 async def on_startup():

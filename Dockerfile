@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
     httpx \
+    aiohttp \
     requests \
     beautifulsoup4 \
     pydantic \
@@ -32,8 +33,10 @@ RUN pip install --no-cache-dir \
 # Copy application files
 COPY gateway /app/gateway
 # The root tree keeps the gateway import stable while reusing the complete
-# historical Claude REST bridge. Its imports resolve against /app/gateway.
+# historical Anthropic and Claude REST bridges. Their imports resolve against
+# /app/gateway.
 COPY Backend/gateway/__init__.py /app/Backend/gateway/__init__.py
+COPY Backend/gateway/anthropic_bridge.py /app/Backend/gateway/anthropic_bridge.py
 COPY Backend/gateway/claude_rest_api.py /app/Backend/gateway/claude_rest_api.py
 COPY hermes_core /app/hermes_core
 COPY ignis /app/ignis

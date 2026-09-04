@@ -1,3 +1,11 @@
+"""Compatibility bridge for the complete historical Anthropic adapter.
+
+The local gateway keeps this module path for existing imports while the
+deployable implementation remains in Backend/gateway.
+"""
+from Backend.gateway.anthropic_bridge import *  # noqa: F401,F403
+from Backend.gateway.anthropic_bridge import router
+
 import json
 import uuid
 
