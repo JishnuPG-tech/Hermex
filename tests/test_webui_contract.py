@@ -51,6 +51,28 @@ class WebUICompatibilityRegressionTests(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertLess(source.index("app.include_router(webui_router)"), source.index("app.include_router(claude_rest_router)"))
 
+    def test_android_health_contract_reports_ok_status(self):
+        tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+        health_check = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "health_check"
+        )
+        response = next(
+            node.value for node in ast.walk(health_check)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "JSONResponse"
+        )
+        payload = response.args[0]
+        fields = {
+            key.value: value.value
+            for key, value in zip(payload.keys, payload.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(value, ast.Constant)
+        }
+        self.assertEqual(fields.get("status"), "ok")
+
     def test_adapter_does_not_add_v1_routes(self):
         routes = route_literals(WEBUI)
         self.assertFalse(any(path == "/v1" or path.startswith("/v1/") for path in routes))
