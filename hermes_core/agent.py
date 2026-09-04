@@ -138,10 +138,13 @@ def clean_tool_markup(t: str, is_token: bool = False) -> str:
 class HermesAgent:
     def __init__(self, upstream_url: str = UPSTREAM_URL, api_key: str = UPSTREAM_API_KEY):
         self.upstream_url = upstream_url
-        self.api_key = api_key
+        self.api_key = (api_key or "").strip()
+        client_headers = {}
+        if self.api_key:
+            client_headers["Authorization"] = f"Bearer {self.api_key}"
         self.http_client = httpx.AsyncClient(
             base_url=self.upstream_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers=client_headers,
             timeout=120.0,
             follow_redirects=True
         )
