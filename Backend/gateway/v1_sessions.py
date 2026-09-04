@@ -22,7 +22,9 @@ def _auth_headers(request: Request) -> dict:
     auth = request.headers.get("authorization")
     if auth:
         return {"Authorization": auth}
-    return {"Authorization": f"Bearer {API_SERVER_KEY}"}
+    if API_SERVER_KEY.strip():
+        return {"Authorization": f"Bearer {API_SERVER_KEY.strip()}"}
+    return {}
 
 
 async def _proxy_to_hermes(path: str, request: Request, default_fallback: Any = None):
