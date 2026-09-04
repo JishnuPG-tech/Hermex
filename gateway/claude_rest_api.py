@@ -1,38 +1,14 @@
-)
-    return {
-        "uuid": mid,
-        "text": text,
-        "sender": sender,
-        "index": idx,
-        "created_at": now,
-        "updated_at": now,
-        "content": [{"type": "text", "text": text}],
-        "attachments": [],
-        "files": [],
-        "parent_message_uuid": prev_uuid,
-        "stop_reason": "end_turn" if sender == "assistant" else None,
-        "stop_sequence": None,
-        "truncated": False
-    }
+"""Compatibility import for the complete Claude REST bridge.
 
-def _build_conv_response(conv: Dict[str, Any]) -> Dict[str, Any]:
-    msgs = conv.get("chat_messages", [])
-    leaf_uuid = msgs[-1]["uuid"] if msgs else None
-    return {
-        "uuid": conv.get("uuid"),
-        "name": conv.get("name", "Chat"),
-        "summary": conv.get("summary") or conv.get("name", "Chat"),
-        "created_at": conv.get("created_at"),
-        "updated_at": conv.get("updated_at"),
-        "settings": {
-            "preview_feature_uses_artifacts": False,
-            "model": "hermes-agent"
-        },
-        "is_starred": conv.get("is_starred", False),
-        "current_leaf_message_uuid": leaf_uuid,
-        "chat_messages": msgs,
-        "model": "hermes-agent"
-    }
+The repository historically contained two copies of the gateway sources:
+``Backend/gateway`` is the deployable Docker source tree while ``gateway`` is
+the source tree used by the local/Replit runtime.  Keep the runtime import
+stable, but load the complete implementation from the canonical Docker copy
+instead of maintaining a second, drift-prone copy.
+"""
+
+from Backend.gateway.claude_rest_api import *  # noqa: F401,F403
+from Backend.gateway.claude_rest_api import router
 
 # 1. Models Catalog (Full ModelOption array matching Organization.claude_ai_bootstrap_models_config)
 MODELS_CATALOG = [
