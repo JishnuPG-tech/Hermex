@@ -26,6 +26,12 @@ The existing OpenAI-compatible `/v1/*` API remains available unchanged. Hermex s
 
 The additive WebUI adapter exposes authentication, sessions, projects, chat/SSE, uploads, workspace files, models, providers, settings, reasoning, and profiles under `/api/*`. Set `HERMES_WEBUI_PASSWORD` in the Hugging Face Space Variables and secrets to enable the independent WebUI password login. Alternatively, set `HERMES_WEBUI_API_KEY` to accept a pre-shared bearer key without issuing a cookie. The adapter uses an HTTP-only session cookie and never returns Gateway credentials to clients. Do not rely on the development fallback (no configured WebUI credential) for a public deployment.
 
+### Hermes Agent server operations
+
+The `Hermes Agent` tool loop owns server-side work; the upstream inference service only supplies model tokens. Its `bash_exec` tool runs Bash directly inside the running Space container with the normal `/app` and `/data` filesystem, network, environment, and installed binaries. It can inspect and edit files, run tests and services, install packages, clone/pull/commit/push Git repositories, and inspect logs or processes. Commands accept a working directory, a 1–600 second timeout, and bounded output. The production image includes Git and Python; package installation remains available to the container runtime.
+
+Multi-step tool calls feed each command result back into the next agent round. `HERMES_MAX_TOOL_ROUNDS` controls the per-request tool loop (default 6, maximum 12), and `HERMES_SERVER_WORKDIR` controls the default shell directory (default `/app`). The agent must verify command output before reporting an operation as complete.
+
 WebUI chat defaults to the existing Hermes runtime at `http://127.0.0.1:8642/v1/chat`, preserving its tools and model fallback behavior. Set `HERMES_WEBUI_CHAT_BACKEND=gateway`, `HERMES_WEBUI_GATEWAY_BASE_URL`, and `HERMES_WEBUI_GATEWAY_API_KEY` only when the deployment topology requires the OpenAI-compatible gateway instead. Conversation data continues in `/data/sessions`; WebUI metadata and file-backed SSE replay state use `/data/hermes/webui`. `/data` must be backed by persistent Space storage for state to survive restarts. `HERMES_AVAILABLE_MODELS` can provide a comma-separated list of models confirmed by the configured provider.
 
 Health: `GET /health`
