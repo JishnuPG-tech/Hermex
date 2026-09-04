@@ -2,6 +2,8 @@ FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV HERMES_SERVER_WORKDIR=/app
+ENV HERMES_MAX_TOOL_ROUNDS=6
 
 WORKDIR /app
 
@@ -10,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     redis-server \
     sqlite3 \
+    git \
     curl \
     ca-certificates \
     procps \
