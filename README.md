@@ -24,8 +24,8 @@ The existing OpenAI-compatible `/v1/*` API remains available unchanged. Hermex s
 
 `https://jishnupg-hermes.hf.space`
 
-The additive WebUI adapter exposes authentication, sessions, projects, chat/SSE, uploads, workspace files, models, providers, settings, reasoning, and profiles under `/api/*`. Set `HERMES_WEBUI_PASSWORD` in the Hugging Face Space Variables and secrets to enable the independent WebUI password login. The adapter uses an HTTP-only session cookie and never returns Gateway credentials to clients.
+The additive WebUI adapter exposes authentication, sessions, projects, chat/SSE, uploads, workspace files, models, providers, settings, reasoning, and profiles under `/api/*`. Set `HERMES_WEBUI_PASSWORD` in the Hugging Face Space Variables and secrets to enable the independent WebUI password login. Alternatively, set `HERMES_WEBUI_API_KEY` to accept a pre-shared bearer key without issuing a cookie. The adapter uses an HTTP-only session cookie and never returns Gateway credentials to clients. Do not rely on the development fallback (no configured WebUI credential) for a public deployment.
 
-WebUI chat defaults to the existing gateway at `http://127.0.0.1:8000`; set `HERMES_WEBUI_GATEWAY_BASE_URL` and `HERMES_WEBUI_GATEWAY_API_KEY` only when the deployment topology requires a different internal gateway. Conversation data continues in `/data/sessions`; WebUI metadata and file-backed SSE replay state use `/data/hermes/webui`. `/data` must be backed by persistent Space storage for state to survive restarts.
+WebUI chat defaults to the existing gateway at `http://127.0.0.1:8000`; set `HERMES_WEBUI_GATEWAY_BASE_URL` and `HERMES_WEBUI_GATEWAY_API_KEY` only when the deployment topology requires a different internal gateway. Conversation data continues in `/data/sessions`; WebUI metadata and file-backed SSE replay state use `/data/hermes/webui`. `/data` must be backed by persistent Space storage for state to survive restarts. `HERMES_AVAILABLE_MODELS` can provide a comma-separated list of models confirmed by the configured provider.
 
 Health: `GET /health`

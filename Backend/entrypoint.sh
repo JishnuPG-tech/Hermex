@@ -6,7 +6,7 @@ log_error() { echo "$(date -u '+%Y-%m-%d %H:%M:%S') [ERROR] [HERMES] $1"; }
 
 # ── Config ──────────────────────────────────────────────────────
 OMNIROUTE_BASE_URL="${OMNIROUTE_BASE_URL:-http://127.0.0.1:20128/v1}"
-OMNIROUTE_API_KEY="${OMNIROUTE_API_KEY:-sk-2e556e0437ee2958-7baf2d-b4133935}"
+OMNIROUTE_API_KEY="${OMNIROUTE_API_KEY:-}"
 HERMES_MODEL="${HERMES_MODEL:-auto/smart}"
 HERMES_INTERNAL_PORT="${HERMES_INTERNAL_PORT:-8642}"
 PUBLIC_PORT="${PUBLIC_PORT:-7860}"

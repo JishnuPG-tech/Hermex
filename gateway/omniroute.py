@@ -22,7 +22,7 @@ MASTER_KEY = (
     or os.getenv("API_SERVER_KEY")
     or os.getenv("INITIAL_PASSWORD")
     or os.getenv("API_KEY_SECRET")
-    or "sk-2e556e0437ee2958-7baf2d-b4133935"
+    or ""
 )
 
 # Referer paths that indicate a dashboard-originating request
@@ -52,25 +52,7 @@ def fixup_omniroute_html(html: str) -> str:
     html = html.replace('action="/', 'action="/omniroute/')
     html = html.replace('/omniroute/omniroute', '/omniroute')
     if "<head>" in html:
-        js_patch = """<script>
-(function() {
-  var origFetch = window.fetch;
-  window.fetch = function(resource, init) {
-    if (typeof resource === 'string' && resource.startsWith('/') && !resource.startsWith('/omniroute') && !resource.startsWith('/_next')) {
-      resource = '/omniroute' + resource;
-    }
-    return origFetch.call(this, resource, init);
-  };
-  var origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('/omniroute') && !url.startsWith('/_next')) {
-      url = '/omniroute' + url;
-    }
-    return origOpen.apply(this, arguments);
-  };
-})();
-</script>"""
-        html = html.replace("<head>", f"<head>{js_patch}", 1)
+        js_patch = ""
     return html
 
 
@@ -100,7 +82,7 @@ async def handle_omniroute_proxy(request: Request, path: str, html_fixup=None):
     else:
         target = f"http://127.0.0.1:{OMNIROUTE_PORT}{req_path}"
 
-    extra_auth = {"Authorization": f"Bearer {MASTER_KEY}"}
+    extra_auth = {"Authorization": f"Bearer {MASTER_KEY}"} if MASTER_KEY else {}
     return await proxy_http_request(target, request, extra_headers=extra_auth, html_fixup=html_fixup)
 
 

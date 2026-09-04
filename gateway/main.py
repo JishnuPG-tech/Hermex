@@ -220,6 +220,3 @@ async def on_shutdown():
     except Exception as e:
         pass
 
-# ── Catch-all proxy -> Hermes agent ─────────────────────────────
-app.include_router(hermes_proxy_router)
-

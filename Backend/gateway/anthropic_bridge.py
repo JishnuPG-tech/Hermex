@@ -30,7 +30,7 @@ UPSTREAM_URL = os.getenv(
 
 UPSTREAM_KEY = os.getenv(
     "ANTHROPIC_BRIDGE_UPSTREAM_KEY",
-    os.getenv("API_SERVER_KEY", os.getenv("OMNIROUTE_API_KEY", "sk-2e556e0437ee2958-7baf2d-b4133935")),
+    os.getenv("API_SERVER_KEY", os.getenv("OMNIROUTE_API_KEY", "")),
 )
 UPSTREAM_MODEL = os.getenv("ANTHROPIC_BRIDGE_UPSTREAM_MODEL", "antigravity/gemini-3.6-flash-medium")
 DEFAULT_APP_MODEL = os.getenv("HERMES_ANTHROPIC_MODEL", "hermes-agent")

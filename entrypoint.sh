@@ -46,7 +46,9 @@ fi
 
 # Step 8: Start FastAPI Gateway (:8000)
 echo "[INIT] Starting FastAPI Ingress Gateway on port 8000..."
-uvicorn gateway.main:app --host 127.0.0.1 --port 8000 --workers 2 > /dev/stdout 2>&1 &
+ # Keep one gateway worker: WebUI stream replay and the existing JSON session
+ # store are process-local caches backed by /data persistence.
+uvicorn gateway.main:app --host 127.0.0.1 --port 8000 --workers 1 > /dev/stdout 2>&1 &
 GATEWAY_PID=$!
 
 # Wait briefly for backends to bind

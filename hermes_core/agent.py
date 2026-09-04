@@ -8,7 +8,7 @@ from hermes_core.tools.registry import registry
 import hermes_core.tools  # Trigger tool discovery
 
 UPSTREAM_URL = os.getenv("UPSTREAM_OMNIROUTE_URL", "https://jishnupg-opencode-cli.hf.space/v1").rstrip("/")
-UPSTREAM_API_KEY = os.getenv("UPSTREAM_API_KEY", os.getenv("API_KEY_SECRET", "sk-2e556e0437ee2958-7baf2d-b4133935"))
+UPSTREAM_API_KEY = os.getenv("UPSTREAM_API_KEY", os.getenv("API_KEY_SECRET", ""))
 DEFAULT_MODEL = os.getenv("HERMES_DEFAULT_MODEL", "auto/best-coding")
 
 HERMES_MASTER_SYSTEM_PROMPT = """You are Hermes Agent, a specialized autonomous AI coding and intelligence companion.

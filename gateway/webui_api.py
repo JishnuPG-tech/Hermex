@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -27,6 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from gateway import sessions_api as session_store
 
 router = APIRouter(tags=["Hermes WebUI"])
+logger = logging.getLogger("hermes.webui")
 
 # The WebUI preference/project state is small metadata. Conversation messages
 # continue to use the existing sessions_api JSON store at /data/sessions.
@@ -39,12 +41,21 @@ _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
 _STATE_FILE = _DATA_ROOT / "state.json"
 _STATE_LOCK = asyncio.Lock()
 _STREAM_LOCKS: Dict[str, asyncio.Lock] = {}
+_STREAM_TASKS: Dict[str, asyncio.Task] = {}
 
 MAX_UPLOAD_BYTES = int(os.getenv("HERMES_WEBUI_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 SESSION_TOKEN_MAX_AGE = 60 * 60 * 24 * 30
 STREAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SENSITIVE_NAMES = {
+    ".env", ".env.local", ".env.production", ".git", ".gitconfig",
+    "id_rsa", "id_ed25519", "credentials.json", "service-account.json",
+}
+_EXECUTABLE_SUFFIXES = {
+    ".apk", ".bat", ".cmd", ".com", ".dll", ".dylib", ".exe", ".jar",
+    ".js", ".msi", ".php", ".pl", ".py", ".rb", ".sh", ".so",
+}
 
 _DEFAULT_STATE: Dict[str, Any] = {
     "projects": [],
@@ -122,8 +133,13 @@ def _password() -> str:
     return os.getenv("HERMES_WEBUI_PASSWORD", "").strip()
 
 
+def _api_key() -> str:
+    """Return the optional pre-shared key without ever exposing it."""
+    return os.getenv("HERMES_WEBUI_API_KEY", os.getenv("API_SERVER_KEY", "")).strip()
+
+
 def _auth_enabled() -> bool:
-    return bool(_password())
+    return bool(_password() or _api_key())
 
 
 def _make_session_token() -> str:
@@ -137,6 +153,12 @@ def _make_session_token() -> str:
 def _valid_session_token(token: Optional[str]) -> bool:
     if not _auth_enabled() or not token:
         return not _auth_enabled()
+    configured_key = _api_key()
+    if configured_key and hmac.compare_digest(token, configured_key):
+        return True
+    password = _password()
+    if not password:
+        return False
     parts = token.split(".")
     if len(parts) != 3:
         return False
@@ -146,7 +168,7 @@ def _valid_session_token(token: Optional[str]) -> bool:
             return False
     except ValueError:
         return False
-    expected = hmac.new(_password().encode(), f"{issued}.{nonce}".encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(password.encode(), f"{issued}.{nonce}".encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(signature, expected)
 
 
@@ -181,11 +203,15 @@ async def auth_status(request: Request):
 
 @router.post("/api/auth/login")
 async def auth_login(request: Request, response: Response):
+    password = _password()
     if not _auth_enabled():
         return {"ok": True, "authenticated": True}
+    if not password:
+        raise HTTPException(status_code=503, detail="Password login is not configured; use the configured bearer key")
     payload = await _body(request)
     supplied = payload.get("password")
-    if not isinstance(supplied, str) or not hmac.compare_digest(supplied, _password()):
+    if not isinstance(supplied, str) or not hmac.compare_digest(supplied, password):
+        logger.warning("WebUI authentication failure")
         raise HTTPException(status_code=401, detail="Invalid password")
     token = _make_session_token()
     response.set_cookie(
@@ -233,6 +259,19 @@ def _message_text(message: Dict[str, Any]) -> str:
                 parts.append(str(item))
         return "".join(parts)
     return str(content or "")
+
+
+def _chat_text(payload: Dict[str, Any]) -> str:
+    value = payload.get("message")
+    if value is None:
+        value = payload.get("prompt", payload.get("text", payload.get("content")))
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return _message_text({"content": value})
+    if isinstance(value, dict):
+        return _message_text(value)
+    return ""
 
 
 def _messages(session_id: str) -> List[Dict[str, Any]]:
@@ -407,6 +446,7 @@ async def create_webui_session(request: Request):
     _require_access(request)
     payload = await _body(request)
     session_id = _new_session(payload)
+    logger.info("WebUI session created: %s", session_id)
     return {"ok": True, "session": _summary(session_id)}
 
 
@@ -433,6 +473,7 @@ async def delete_webui_session(request: Request):
     session_store._SESSIONS.pop(sid, None)
     session_store._MESSAGES.pop(sid, None)
     session_store._save_data()
+    logger.info("WebUI session deleted: %s", sid)
     return {"ok": True, "session": None}
 
 
@@ -721,6 +762,17 @@ def _cancel_requested(stream_id: str) -> bool:
     return bool(meta and meta.get("cancel_requested"))
 
 
+def _stream_id_from_last_event(request: Request) -> Optional[int]:
+    """Read an SSE Last-Event-ID of the form stream_id:sequence."""
+    value = request.headers.get("last-event-id", "")
+    if ":" in value:
+        value = value.rsplit(":", 1)[-1]
+    try:
+        return max(0, int(value)) if value else None
+    except ValueError:
+        return None
+
+
 def _agent_messages(session_id: str) -> List[Dict[str, str]]:
     result = []
     for item in _messages(session_id):
@@ -742,6 +794,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
     had_error = False
     cancelled = False
     try:
+        logger.info("WebUI stream started: %s", stream_id)
         meta["status"] = "running"
         _write_stream_meta(stream_id, meta)
         backend = os.getenv("HERMES_WEBUI_CHAT_BACKEND", "gateway").strip().lower()
@@ -795,7 +848,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
                                 await _publish(stream_id, "reasoning", {"text": str(reasoning)})
                             if delta.get("tool_calls"):
                                 for tool_call in delta["tool_calls"]:
-                                    await _publish(stream_id, "tool", tool_call)
+                                    await _publish(stream_id, "tool_call", tool_call)
                             continue
                         kind = item.get("type")
                         if kind in {"text", "token"}:
@@ -809,9 +862,9 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
                                 reasoning_text.append(text)
                                 await _publish(stream_id, "reasoning", {"text": text})
                         elif kind in {"tool", "tool_call"}:
-                            await _publish(stream_id, "tool", {k: v for k, v in item.items() if k != "type"})
+                            await _publish(stream_id, "tool_call", {k: v for k, v in item.items() if k != "type"})
                         elif kind in {"tool_complete", "tool_result"}:
-                            await _publish(stream_id, "tool_complete", {k: v for k, v in item.items() if k != "type"})
+                            await _publish(stream_id, "tool_result", {k: v for k, v in item.items() if k != "type"})
                         elif kind == "error":
                             had_error = True
                             await _publish(stream_id, "error", {"error": str(item.get("error", "Agent error")), "session_id": session_id}, "error")
@@ -820,6 +873,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
         cancelled = True
     except Exception:
         had_error = True
+        logger.exception("WebUI stream failed: %s", stream_id)
         await _publish(stream_id, "error", {"error": "Hermes agent is temporarily unavailable", "session_id": session_id}, "error")
     finally:
         if assistant_text or reasoning_text:
@@ -841,7 +895,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
             detail = _detail(session_id, include_messages=False)
             await _publish(stream_id, "done", {"session_id": session_id, "session": detail, "usage": _session_usage_payload(sess)}, "done")
         meta = _read_stream_meta(stream_id) or meta
-        meta["status"] = "cancelled" if (cancelled or _cancel_requested(stream_id)) else ("error" if had_error else "done")
+        meta["status"] = "cancelled" if (cancelled or _cancel_requested(stream_id)) else ("error" if had_error else "completed")
         meta["finished_at"] = _now()
         _write_stream_meta(stream_id, meta)
         if not had_error and not cancelled:
@@ -850,7 +904,9 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
             await _publish(stream_id, "stream_end", {"session_id": session_id}, "cancelled")
         else:
             await _publish(stream_id, "stream_end", {"session_id": session_id}, "error")
+        _STREAM_TASKS.pop(stream_id, None)
         _STREAM_LOCKS.pop(stream_id, None)
+        logger.info("WebUI stream finished: %s (%s)", stream_id, meta.get("status"))
 
 
 def _session_usage_payload(sess: Dict[str, Any]) -> Dict[str, Any]:
@@ -861,10 +917,10 @@ def _session_usage_payload(sess: Dict[str, Any]) -> Dict[str, Any]:
 async def start_webui_chat(request: Request):
     owner = _stream_owner(request)
     payload = await _body(request)
-    message = payload.get("message")
-    if not isinstance(message, str) or not message.strip():
+    message = _chat_text(payload)
+    if not message.strip():
         return _json_error("message is required")
-    session_id = str(payload.get("session_id") or "")
+    session_id = str(payload.get("session_id") or payload.get("conversation_id") or "")
     if not session_id:
         session_id = _new_session(payload)
     sess = _session(session_id)
@@ -886,7 +942,9 @@ async def start_webui_chat(request: Request):
     _write_stream_meta(stream_id, meta)
     _stream_events_path(stream_id).write_text("", encoding="utf-8")
     _touch(session_id)
-    asyncio.create_task(_chat_worker(stream_id, owner))
+    task = asyncio.create_task(_chat_worker(stream_id, owner), name=f"hermes-webui-stream-{stream_id}")
+    _STREAM_TASKS[stream_id] = task
+    logger.info("WebUI stream queued: %s", stream_id)
     return {"stream_id": stream_id, "session_id": session_id}
 
 
@@ -896,7 +954,8 @@ async def stream_webui_chat(request: Request, stream_id: str, replay: int = 0, a
     meta = _read_stream_meta(stream_id)
     if not meta or meta.get("owner") != owner:
         raise HTTPException(status_code=404, detail="Stream not found")
-    starting_seq = max(0, int(after_seq or 0))
+    requested_seq = after_seq if after_seq is not None else _stream_id_from_last_event(request)
+    starting_seq = max(0, int(requested_seq or 0))
 
     async def event_generator():
         last_seq = starting_seq
@@ -918,14 +977,14 @@ async def stream_webui_chat(request: Request, stream_id: str, replay: int = 0, a
                 pass
             for record in records:
                 last_seq = int(record["seq"])
-                yield f"id: {stream_id}:{last_seq}\\nevent: {record['event']}\\ndata: {json.dumps(record['data'], ensure_ascii=False, separators=(',', ':'))}\\n\\n"
+                yield f"id: {stream_id}:{last_seq}\nevent: {record['event']}\ndata: {json.dumps(record['data'], ensure_ascii=False, separators=(',', ':'))}\n\n"
             latest = _read_stream_meta(stream_id) or {}
             latest_seq = int(latest.get("seq", 0))
-            if latest.get("status") in {"done", "error", "cancelled"} and last_seq >= latest_seq:
+            if latest.get("status") in {"done", "completed", "error", "cancelled"} and last_seq >= latest_seq:
                 return
             if _now() - heartbeat_at >= 15:
                 heartbeat_at = _now()
-                yield ": heartbeat\\n\\n"
+                yield ": heartbeat\n\n"
             await asyncio.sleep(0.2)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
@@ -939,6 +998,10 @@ async def cancel_webui_chat(request: Request, stream_id: str):
         raise HTTPException(status_code=404, detail="Stream not found")
     meta["cancel_requested"] = True
     _write_stream_meta(stream_id, meta)
+    task = _STREAM_TASKS.get(stream_id)
+    if task and not task.done():
+        task.cancel()
+    logger.info("WebUI stream cancellation requested: %s", stream_id)
     return {"ok": True, "cancelled": True}
 
 
@@ -948,7 +1011,8 @@ async def chat_stream_status(request: Request, stream_id: str):
     meta = _read_stream_meta(stream_id)
     if not meta or meta.get("owner") != owner:
         raise HTTPException(status_code=404, detail="Stream not found")
-    return {"active": meta.get("status") in {"starting", "running"}, "session_id": meta.get("session_id"), "stream_id": stream_id, "active_stream_id": stream_id if meta.get("status") in {"starting", "running"} else None, "is_streaming": meta.get("status") in {"starting", "running"}, "replay_available": int(meta.get("seq", 0)) > 0}
+    active = meta.get("status") in {"starting", "running"}
+    return {"active": active, "status": meta.get("status"), "session_id": meta.get("session_id"), "stream_id": stream_id, "active_stream_id": stream_id if active else None, "is_streaming": active, "replay_available": int(meta.get("seq", 0)) > 0, "finished_at": meta.get("finished_at")}
 
 
 @router.post("/api/chat/steer")
@@ -964,8 +1028,16 @@ async def steer_webui_chat(request: Request):
     meta = _read_stream_meta(stream_id)
     if not meta or meta.get("status") not in {"starting", "running"}:
         return {"accepted": False, "fallback": "No active stream"}
-    await _publish(stream_id, "pending_steer_leftover", {"text": text.strip()})
-    return {"accepted": True, "stream_id": stream_id}
+    return JSONResponse(
+        {
+            "accepted": False,
+            "error": {
+                "code": "steering_unsupported",
+                "message": "The configured Hermes runtime does not support mid-stream steering",
+            },
+        },
+        status_code=409,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1074,33 @@ def _within(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_sensitive_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _SENSITIVE_NAMES or lowered.startswith(".env.") or lowered.endswith((".pem", ".key", ".p12", ".pfx"))
+
+
+def _safe_upload_name(raw_name: Any) -> str:
+    filename = Path(str(raw_name or "upload.bin")).name.replace("\x00", "")
+    if (
+        not filename
+        or filename in {".", ".."}
+        or filename.startswith(".")
+        or _is_sensitive_name(filename)
+        or Path(filename).suffix.lower() in _EXECUTABLE_SUFFIXES
+    ):
+        raise HTTPException(status_code=415, detail="This filename is not allowed")
+    return filename
+
+
+def _check_upload_length(request: Request) -> None:
+    raw_length = request.headers.get("content-length")
+    try:
+        if raw_length and int(raw_length) > MAX_UPLOAD_BYTES + 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Upload exceeds the configured size limit")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
+
 def _workspace_path(session_id: Optional[str], raw_path: Optional[str] = None, must_exist: bool = False) -> Path:
     roots = _configured_roots()
     session_root = None
@@ -1017,12 +1116,16 @@ def _workspace_path(session_id: Optional[str], raw_path: Optional[str] = None, m
     parts = Path(raw).parts
     if ".." in parts:
         raise HTTPException(status_code=400, detail="Path traversal is not allowed")
+    if any(_is_sensitive_name(part) or part.startswith(".") for part in parts if part not in {".", "/"}):
+        raise HTTPException(status_code=403, detail="Access to private files is not allowed")
     candidate = Path(raw).expanduser() if Path(raw).is_absolute() else root / raw
     candidate = candidate.resolve()
     if not any(_within(candidate, allowed) for allowed in roots):
         raise HTTPException(status_code=403, detail="Path is outside the workspace")
     if must_exist and not candidate.exists():
         raise HTTPException(status_code=404, detail="Path not found")
+    if candidate.is_file() and _is_sensitive_name(candidate.name):
+        raise HTTPException(status_code=403, detail="Access to private files is not allowed")
     return candidate
 
 
@@ -1110,7 +1213,11 @@ async def list_workspace_directory(request: Request, session_id: str, path: Opti
         raise HTTPException(status_code=400, detail="Path is not a directory")
     entries = []
     for child in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-        if child.name.startswith("."):
+        try:
+            resolved_child = child.resolve()
+        except OSError:
+            continue
+        if child.name.startswith(".") or _is_sensitive_name(child.name) or not any(_within(resolved_child, root) for root in _configured_roots()):
             continue
         entries.append({"name": child.name, "path": str(child.relative_to(_workspace_path(session_id))), "type": "directory" if child.is_dir() else "file", "size": child.stat().st_size if child.is_file() else None, "modified_at": child.stat().st_mtime})
     return {"entries": entries, "path": str(directory)}
@@ -1143,6 +1250,7 @@ async def raw_workspace_file(request: Request, session_id: str, path: str):
 @router.post("/api/upload")
 async def upload_workspace_file(request: Request):
     _require_access(request)
+    _check_upload_length(request)
     form = await request.form()
     uploaded = form.get("file")
     if not isinstance(uploaded, UploadFile) and not hasattr(uploaded, "filename"):
@@ -1153,9 +1261,7 @@ async def upload_workspace_file(request: Request):
     root = _workspace_path(session_id)
     destination = root / "uploads"
     destination.mkdir(parents=True, exist_ok=True)
-    filename = Path(str(uploaded.filename or "upload.bin")).name.replace("\x00", "")
-    if not filename or filename in {".", ".."}:
-        return _json_error("Invalid filename")
+    filename = _safe_upload_name(uploaded.filename)
     target = destination / filename
     counter = 1
     while target.exists():
@@ -1171,6 +1277,7 @@ async def upload_workspace_file(request: Request):
                 total += len(chunk)
                 if total > MAX_UPLOAD_BYTES:
                     target.unlink(missing_ok=True)
+                    logger.warning("WebUI upload rejected for size: %s", target.name)
                     return _json_error("Upload exceeds the configured size limit", 413)
                 output.write(chunk)
     finally:
@@ -1182,6 +1289,7 @@ async def upload_workspace_file(request: Request):
 @router.post("/api/upload/extract")
 async def extract_uploaded_file(request: Request):
     _require_access(request)
+    _check_upload_length(request)
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/"):
         form = await request.form()
@@ -1194,9 +1302,7 @@ async def extract_uploaded_file(request: Request):
         root = _workspace_path(session_id)
         destination = root / "uploads"
         destination.mkdir(parents=True, exist_ok=True)
-        filename = Path(str(uploaded.filename or "upload.bin")).name.replace("\\x00", "")
-        if not filename or filename in {".", ".."}:
-            return _json_error("Invalid filename")
+        filename = _safe_upload_name(uploaded.filename)
         target = destination / filename
         counter = 1
         while target.exists():
@@ -1238,7 +1344,8 @@ def _default_model() -> str:
 
 
 def _model_ids() -> List[str]:
-    values = [_default_model(), "auto/best-coding", "auto/best-reasoning", "auto/best-chat", "auto/fast"]
+    configured = os.getenv("HERMES_AVAILABLE_MODELS", "")
+    values = [_default_model()] + [item.strip() for item in configured.split(",") if item.strip()]
     return list(dict.fromkeys(item for item in values if item))
 
 
@@ -1250,7 +1357,8 @@ def _provider_rows() -> List[Dict[str, Any]]:
     base = os.getenv("OMNIROUTE_BASE_URL", os.getenv("UPSTREAM_OMNIROUTE_URL", ""))
     parsed = urlsplit(base)
     safe_base = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")) if parsed.scheme else ""
-    return [{"id": "omniroute", "name": "OmniRoute", "display_name": "OmniRoute", "configured": bool(base), "has_key": bool(os.getenv("OMNIROUTE_API_KEY") or os.getenv("UPSTREAM_API_KEY")), "configurable": False, "is_self_hosted": False, "base_url": safe_base, "models": [{"id": item, "label": item} for item in _model_ids()], "models_total": len(_model_ids())}]
+    models = _model_ids()
+    return [{"id": "omniroute", "name": "OmniRoute", "display_name": "OmniRoute", "configured": bool(base), "has_key": bool(os.getenv("OMNIROUTE_API_KEY") or os.getenv("UPSTREAM_API_KEY") or os.getenv("API_SERVER_KEY")), "configurable": False, "is_self_hosted": False, "base_url": safe_base, "models": [{"id": item, "label": item} for item in models], "models_total": len(models)}]
 
 
 @router.get("/api/commands")

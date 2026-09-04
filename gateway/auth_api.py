@@ -13,7 +13,7 @@ logger = logging.getLogger("auth_api")
 router = APIRouter()
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "292824298430-113kq16cbpq6i02jin424gb1mk5ebm40.apps.googleusercontent.com")
-JWT_SECRET = os.getenv("HERMES_JWT_SECRET", "TfbVB8E4Dsq2BUU9INKauUJ_qENXka1mR6eNoID6Z0wtB1GO_kM62HP-0FqE-oE-")
+JWT_SECRET = os.getenv("HERMES_JWT_SECRET", os.getenv("JWT_SECRET", ""))
 GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 
 ADMIN_EMAILS = {"jishnupg2005@gmail.com", "jishnu.pg@gmail.com"}
@@ -81,6 +81,8 @@ async def verify_google_id_token(token_str: str) -> Dict[str, Any]:
     raise HTTPException(status_code=401, detail="Invalid Google token key")
 
 def create_session_token(user_data: Dict[str, Any]) -> str:
+    if not JWT_SECRET:
+        raise HTTPException(status_code=503, detail="Authentication is not configured")
     now = datetime.datetime.utcnow()
     payload = {
         "sub": user_data.get("id"),

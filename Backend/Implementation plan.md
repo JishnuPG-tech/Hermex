@@ -28,7 +28,7 @@ What was found:
 What was patched:
 - network_security_config.xml — added <certificates src="user" /> to trust user CA certs (enables mitmproxy)
 - Base URL redirected from api.anthropic.com to jishnupg-hermes.hf.space
-- Bearer token auth injected (sk-2e556e0437ee2958-7baf2d-b4133935)
+- Bearer token auth is injected from deployment configuration (never committed)
 - APK rebuilt, zipaligned, debug-signed → Claude_hermes_v1_patched_final_aligned_signed.apk
 Key smali files mapped:
 File	Purpose
@@ -130,7 +130,7 @@ What was found:
 What was patched:
 - network_security_config.xml — added <certificates src="user" /> to trust user CA certs (enables mitmproxy)
 - Base URL redirected from api.anthropic.com to jishnupg-hermes.hf.space
-- Bearer token auth injected (sk-2e556e0437ee2958-7baf2d-b4133935)
+- Bearer token auth is injected from deployment configuration (never committed)
 - APK rebuilt, zipaligned, debug-signed → Claude_hermes_v1_patched_final_aligned_signed.apk
 Key smali files mapped:
 File	Purpose
@@ -176,7 +176,7 @@ What was found:
 What was patched:
 - network_security_config.xml — added <certificates src="user" /> to trust user CA certs (enables mitmproxy)
 - Base URL redirected from api.anthropic.com to jishnupg-hermes.hf.space
-- Bearer token auth injected (sk-2e556e0437ee2958-7baf2d-b4133935)
+- Bearer token auth is injected from deployment configuration (never committed)
 - APK rebuilt, zipaligned, debug-signed → Claude_hermes_v1_patched_final_aligned_signed.apk
 Key smali files mapped:
 File	Purpose
@@ -315,7 +315,7 @@ Request Flow (End-to-End)
    → Returns: conversation history array
 4. User types message
 5. App sends POST /hermes/v1/messages
-   Headers: Authorization: Bearer sk-2e556e0437ee2958-7baf2d-b4133935
+   Headers: Authorization: Bearer <deployment-configured-key>
             Anthropic-Version: 2023-06-01
             Anthropic-Beta: ccr-byoc-2025-07-29
    Body: {"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Hello"}],"stream":true}
@@ -408,7 +408,7 @@ curl https://jishnupg-hermes.hf.space/api/vaults
 # Claude APK bridge (SSE test)
 curl -X POST https://jishnupg-hermes.hf.space/hermes/v1/messages `
   -H "Content-Type: application/json" `
-  -H "Authorization: Bearer sk-2e556e0437ee2958-7baf2d-b4133935" `
+  -H "Authorization: Bearer <deployment-configured-key>" `
   -d '{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Hi"}],"stream":true}'
 
 # Install patched APK
