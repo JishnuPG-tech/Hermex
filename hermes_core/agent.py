@@ -16,9 +16,14 @@ HERMES_MASTER_SYSTEM_PROMPT = """You are Hermes Agent, a specialized autonomous 
 Core Identity, Persona & Rules:
 1. Self-Identification: Always introduce and identify yourself strictly as "Hermes Agent" (or "Hermes"). Never say you are Gemini, Claude, ChatGPT, OpenAI, or OmniRoute. Never mention any upstream model providers or infrastructure.
 2. Character & Tone: Highly intelligent, concise, sharp, direct, and proactive. Provide high-quality technical depth, immediate answers, and crisp code without excessive fluff.
-3. Live Tools & Memory: You have full access to real-time tools including web search (web_search, fetch_webpage), python/bash execution (python_exec, bash_exec), Obsidian knowledge graph (vault_search_notes, vault_write_note), and long-term memory (memory_store, memory_recall).
+3. Live Tools & Memory: You have full access to real-time tools including web search (web_search, fetch_webpage), Python execution, and bash_exec. bash_exec operates directly on the Hermes Agent server container, not a pretend sandbox: use it to inspect and read files, write or edit files, run tests and services, install packages, clone/pull/commit/push repositories, and inspect logs/processes. Verify command output before reporting success. You also have the Obsidian knowledge graph (vault_search_notes, vault_write_note) and long-term memory (memory_store, memory_recall).
 4. Direct Inline Content: NEVER use <antArtifact> tags or standalone artifact wrappers. Always output all Markdown (.md), HTML code, Python scripts, documentation, and diagrams directly inline inside standard fenced markdown blocks (e.g. ```html, ```markdown, ```python) so the user reads everything seamlessly in the chat.
-5. Direct Action: Never reply with vague disclaimers. Always take direct action and deliver rich, formatted answers."""
+5. Direct Action: Never reply with vague disclaimers. Always take direct action and deliver rich, formatted answers. The upstream inference service only supplies model tokens; Hermes Agent owns the tool execution and server-side work."""
+
+try:
+    MAX_TOOL_ROUNDS = max(1, min(int(os.getenv("HERMES_MAX_TOOL_ROUNDS", "6")), 12))
+except ValueError:
+    MAX_TOOL_ROUNDS = 6
 
 def extract_text_tool_calls(text: str, known_tools: set) -> List[Dict[str, Any]]:
     calls = []
@@ -261,15 +266,17 @@ class HermesAgent:
         known_tools = set(registry._tools.keys())
         stream_succeeded = False
         last_error = ""
-        executed_tool_signatures = set()
 
         for candidate in candidate_models:
             current_messages = list(payload_messages)
             gathered_data_blocks = []
+            executed_tool_signatures = set()
             try:
-                # Stage 1: Autonomous Tool Execution (up to 2 rounds if tools are enabled)
+                # Stage 1: Autonomous Tool Execution. Tool results are fed back
+                # into the model so multi-step server work can continue instead
+                # of stopping after the first shell command.
                 if tools:
-                    for step in range(2):
+                    for step in range(MAX_TOOL_ROUNDS):
                         req_body = {
                             "model": candidate,
                             "messages": current_messages,
@@ -380,6 +387,7 @@ class HermesAgent:
                                 gathered_data_blocks.append(f"[web_search ({clean_query})]:\n{result_str}")
                             break
 
+                        tool_results = []
                         for tc in unique_calls:
                             tool_name = tc["name"]
                             tool_args = tc["arguments"]
@@ -401,7 +409,35 @@ class HermesAgent:
 
                             yield {"type": "thinking", "content": f"{icon} Executing {tool_name}: {query_desc}...\n"}
                             result_str = await registry.execute_tool(tool_name, tool_args)
+                            tool_results.append(result_str)
                             gathered_data_blocks.append(f"[{tool_name} ({query_desc})]:\n{result_str}")
+
+                        # Preserve the normal OpenAI tool-call conversation
+                        # contract. This lets the next round reason over the
+                        # actual server result and issue the next operation.
+                        if unique_calls:
+                            current_messages.append({
+                                "role": "assistant",
+                                "content": raw_text_accum or None,
+                                "tool_calls": [
+                                    {
+                                        "id": tc["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc["name"],
+                                            "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
+                                        },
+                                    }
+                                    for tc in unique_calls
+                                ],
+                            })
+                            for tc, result_str in zip(unique_calls, tool_results):
+                                current_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "name": tc["name"],
+                                    "content": result_str,
+                                })
 
                 # Stage 2: Guaranteed Direct Synthesis Stream (WITHOUT TOOLS)
                 p_lower = last_user_msg.lower()
