@@ -224,6 +224,18 @@ class WebUIRuntimeRegressionTests(unittest.TestCase):
         self.assertTrue(task.cancelled)
         self.assertTrue(webui._read_stream_meta(stream_id)["cancel_requested"])
 
+    def test_stream_metadata_recreates_missing_stream_directory(self):
+        stream_id = "missing-stream-dir"
+        missing_directory = Path(_TEMP_ROOT.name) / "webui-missing" / "streams"
+        with patch.object(webui, "_STREAMS_DIR", missing_directory):
+            webui._write_stream_meta(stream_id, {"stream_id": stream_id, "status": "starting"})
+
+            self.assertTrue(missing_directory.is_dir())
+            self.assertEqual(
+                webui._read_stream_meta(stream_id)["status"],
+                "starting",
+            )
+
     def test_workspace_traversal_and_symlink_escape_are_blocked(self):
         self._login()
         session_id = self._new_session()
