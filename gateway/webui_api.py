@@ -834,6 +834,10 @@ def _queue_chat_stream(session_id: str, owner: str) -> str:
 def _stream_path(stream_id: str, suffix: str) -> Path:
     if not STREAM_ID_RE.fullmatch(stream_id):
         raise HTTPException(status_code=400, detail="Invalid stream id")
+    # The persistent /data mount can be attached after module import, and a
+    # user-managed volume can also lose empty subdirectories. Recreate the
+    # stream directory at the point of use so chat startup is self-healing.
+    _STREAMS_DIR.mkdir(parents=True, exist_ok=True)
     return _STREAMS_DIR / f"{stream_id}{suffix}"
 
 
