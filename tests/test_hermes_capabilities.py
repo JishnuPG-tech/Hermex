@@ -61,6 +61,12 @@ class HermesServerCapabilityTests(unittest.TestCase):
         self.assertIn('if UPSTREAM_KEY else {}', bridge)
         self.assertIn("if API_SERVER_KEY.strip():", proxy)
 
+    def test_channel_gateway_has_openai_compatible_agent_route(self):
+        source = AGENT.read_text(encoding="utf-8")
+        self.assertIn('@app.post("/v1/chat/completions")', source)
+        self.assertIn("chat.completion.chunk", source)
+        self.assertIn('"reasoning_content"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
