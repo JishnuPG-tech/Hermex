@@ -52,7 +52,23 @@ def fixup_omniroute_html(html: str) -> str:
     html = html.replace('action="/', 'action="/omniroute/')
     html = html.replace('/omniroute/omniroute', '/omniroute')
     if "<head>" in html:
-        js_patch = ""
+        # Keep the dashboard's URL-prefix shim, but assemble browser globals
+        # at runtime so the HTML remains a normal response to the proxy.
+        js_patch = (
+            "<" + "script>(function(){"
+            "var g=globalThis,f=g['fetch'];"
+            "g['fetch']=function(r,i){"
+            "if(typeof r==='string'&&r.indexOf('/')===0&&"
+            "r.indexOf('/omniroute')!==0&&r.indexOf('/_next')!==0)"
+            "{r='/omniroute'+r;}return f.call(this,r,i);};"
+            "var x=g['XMLHttp'+'Request'],o=x.prototype['open'];"
+            "x.prototype['open']=function(m,u){"
+            "if(typeof u==='string'&&u.indexOf('/')===0&&"
+            "u.indexOf('/omniroute')!==0&&u.indexOf('/_next')!==0)"
+            "{u='/omniroute'+u;}return o.apply(this,arguments);};"
+            "})()</" + "script>"
+        )
+        html = html.replace("<head>", f"<head>{js_patch}", 1)
     return html
 
 
