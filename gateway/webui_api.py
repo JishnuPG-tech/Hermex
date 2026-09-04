@@ -1,4 +1,94 @@
+"""Hermes WebUI compatibility adapter.
 
+This module deliberately owns only /api/* WebUI routes. The existing /v1/*
+proxy and Anthropic-compatible routes are not changed.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import mimetypes
+import os
+import re
+import secrets
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, urlsplit, urlunsplit
+
+import httpx
+from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+
+from gateway import sessions_api as session_store
+
+router = APIRouter(tags=["Hermes WebUI"])
+logger = logging.getLogger("hermes.webui")
+
+# The WebUI preference/project state is small metadata. Conversation messages
+# continue to use the existing sessions_api JSON store at /data/sessions.
+_DATA_ROOT = Path(os.getenv("HERMES_WEBUI_DATA_DIR", "/data/hermes/webui"))
+if not Path("/data").exists() and "HERMES_WEBUI_DATA_DIR" not in os.environ:
+    _DATA_ROOT = Path("/tmp/hermes_webui")
+_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+_STREAMS_DIR = _DATA_ROOT / "streams"
+_STREAMS_DIR.mkdir(parents=True, exist_ok=True)
+_STATE_FILE = _DATA_ROOT / "state.json"
+_STATE_LOCK = asyncio.Lock()
+_STREAM_LOCKS: Dict[str, asyncio.Lock] = {}
+_STREAM_TASKS: Dict[str, asyncio.Task] = {}
+
+MAX_UPLOAD_BYTES = int(os.getenv("HERMES_WEBUI_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+MAX_PREVIEW_BYTES = 2 * 1024 * 1024
+MAX_REPLAY_EVENTS = 4096
+SESSION_TOKEN_MAX_AGE = 60 * 60 * 24 * 30
+STREAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SENSITIVE_NAMES = {
+    ".env", ".env.local", ".env.production", ".git", ".gitconfig",
+    "id_rsa", "id_ed25519", "credentials", "credentials.json",
+    "service-account.json", "service_account.json", "authorized_keys",
+}
+_EXECUTABLE_SUFFIXES = {
+    ".apk", ".bat", ".cmd", ".com", ".dll", ".dylib", ".exe", ".jar",
+    ".js", ".msi", ".php", ".pl", ".py", ".rb", ".sh", ".so",
+}
+
+# Authentication credentials are deliberately separate from the principal
+# used for resource ownership. This deployment is single-user today, so all
+# valid credentials resolve to one durable principal.
+WEBUI_PRINCIPAL = "webui-user"
+
+_DEFAULT_STATE: Dict[str, Any] = {
+    "projects": [],
+    "workspaces": [],
+    "default_model": None,
+    "reasoning_effort": "medium",
+    "reasoning_display": "off",
+    "settings": {
+        "show_cli_sessions": False,
+        "show_claude_code_sessions": False,
+    },
+    "profiles": [],
+}
+
+
+def _load_state() -> Dict[str, Any]:
+    try:
+        if _STATE_FILE.exists():
+            raw = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                state = json.loads(json.dumps(_DEFAULT_STATE))
+                state.update(raw)
+                return state
+    except (OSError, ValueError, TypeError):
+        pass
+    return json.loads(json.dumps(_DEFAULT_STATE))
 
 
 _WEBUI_STATE = _load_state()
@@ -52,7 +142,7 @@ def _password() -> str:
 
 def _api_key() -> str:
     """Return the optional pre-shared key without ever exposing it."""
-    return os.getenv("HERMES_WEBUI_API_KEY", os.getenv("API_SERVER_KEY", "")).strip()
+    return os.getenv("HERMES_WEBUI_API_KEY", "").strip() or os.getenv("API_SERVER_KEY", "").strip()
 
 
 def _auth_enabled() -> bool:
@@ -117,7 +207,9 @@ def _require_access(request: Request) -> str:
         raise HTTPException(status_code=401, detail="WebUI authentication required")
     if not _auth_enabled():
         return "anonymous"
-    return hashlib.sha256((token or "").encode()).hexdigest()[:24]
+    # A password login issues a fresh credential on every login. Never derive
+    # ownership from that credential or logout/re-login would orphan data.
+    return WEBUI_PRINCIPAL
 
 
 @router.get("/api/auth/status")
@@ -174,6 +266,30 @@ def _session(session_id: str) -> Dict[str, Any]:
     if not value:
         raise HTTPException(status_code=404, detail="Session not found")
     return value
+
+
+def _owned_session(session_id: str, owner: str) -> Dict[str, Any]:
+    """Load a WebUI session and enforce its resource ownership.
+
+    Sessions created before ownership metadata existed are claimed by the
+    current single-user principal on first WebUI access. Sessions created by
+    this adapter are always tagged at creation time.
+    """
+    sess = _session(session_id)
+    stored_owner = sess.get("webui_owner")
+    if stored_owner is None:
+        sess["webui_owner"] = owner
+        session_store._save_data()
+    elif stored_owner != owner:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sess
+
+
+def _session_owner(session_id: str) -> Optional[str]:
+    try:
+        return _session(session_id).get("webui_owner")
+    except HTTPException:
+        return None
 
 
 def _message_text(message: Dict[str, Any]) -> str:
@@ -270,13 +386,18 @@ def _touch(session_id: str) -> None:
     session_store._save_data()
 
 
-def _new_session(payload: Optional[Dict[str, Any]] = None) -> str:
+def _new_session(payload: Optional[Dict[str, Any]] = None, owner: str = WEBUI_PRINCIPAL) -> str:
     payload = payload or {}
     raw_id = payload.get("session_id") or payload.get("id")
     session_id = str(raw_id) if raw_id else f"sess_{secrets.token_hex(12)}"
     if not SESSION_ID_RE.fullmatch(session_id):
         raise HTTPException(status_code=400, detail="Invalid session id")
     if session_id in session_store._SESSIONS:
+        existing = session_store._SESSIONS[session_id]
+        if existing.get("webui_owner") not in {None, owner}:
+            raise HTTPException(status_code=404, detail="Session not found")
+        existing.setdefault("webui_owner", owner)
+        session_store._save_data()
         return session_id
     now = _iso()
     session_store._SESSIONS[session_id] = {
@@ -291,6 +412,7 @@ def _new_session(payload: Optional[Dict[str, Any]] = None) -> str:
         "profile": payload.get("profile"),
         "pinned": False,
         "archived": False,
+        "webui_owner": owner,
     }
     session_store._MESSAGES[session_id] = []
     session_store._CONV_TO_SESSION[session_id] = session_id
@@ -300,9 +422,12 @@ def _new_session(payload: Optional[Dict[str, Any]] = None) -> str:
 
 @router.get("/api/sessions")
 async def list_webui_sessions(request: Request, include_archived: int = 0, archived_limit: Optional[int] = None):
-    _require_access(request)
+    owner = _require_access(request)
     values = []
     for sid in list(session_store._SESSIONS):
+        if _session_owner(sid) not in {None, owner}:
+            continue
+        _owned_session(sid, owner)
         summary = _summary(sid)
         if summary["archived"] and not include_archived:
             continue
@@ -313,7 +438,11 @@ async def list_webui_sessions(request: Request, include_archived: int = 0, archi
     return {
         "sessions": values,
         "cli_count": 0,
-        "archived_count": sum(bool(s.get("archived", False)) for s in map(_summary, session_store._SESSIONS)),
+        "archived_count": sum(
+            bool(session_store._SESSIONS[sid].get("archived", False))
+            for sid in session_store._SESSIONS
+            if session_store._SESSIONS[sid].get("webui_owner") in {None, owner}
+        ),
         "server_time": _now(),
         "server_tz": "UTC",
     }
@@ -321,10 +450,13 @@ async def list_webui_sessions(request: Request, include_archived: int = 0, archi
 
 @router.get("/api/sessions/search")
 async def search_webui_sessions(request: Request, q: str = "", content: int = 0, depth: int = 1):
-    _require_access(request)
+    owner = _require_access(request)
     needle = q.strip().lower()
     found = []
     for sid in session_store._SESSIONS:
+        if _session_owner(sid) not in {None, owner}:
+            continue
+        _owned_session(sid, owner)
         summary = _summary(sid)
         haystack = summary["title"].lower()
         if content:
@@ -337,14 +469,15 @@ async def search_webui_sessions(request: Request, q: str = "", content: int = 0,
 
 @router.get("/api/session")
 async def get_webui_session(request: Request, session_id: str, messages: int = 1, msg_limit: Optional[int] = 50, msg_before: Optional[int] = None, expand_renderable: int = 0):
-    _require_access(request)
+    owner = _require_access(request)
+    _owned_session(session_id, owner)
     return {"session": _detail(session_id, messages != 0, msg_limit, msg_before)}
 
 
 @router.get("/api/session/status")
 async def session_status(request: Request, session_id: str):
-    _require_access(request)
-    sess = _session(session_id)
+    owner = _require_access(request)
+    sess = _owned_session(session_id, owner)
     stream_id = sess.get("active_stream_id")
     meta = _read_stream_meta(stream_id) if stream_id else None
     active = bool(meta and meta.get("status") in {"starting", "running"})
@@ -360,8 +493,8 @@ async def session_status(request: Request, session_id: str):
 
 @router.get("/api/session/usage")
 async def session_usage(request: Request, session_id: str):
-    _require_access(request)
-    sess = _session(session_id)
+    owner = _require_access(request)
+    sess = _owned_session(session_id, owner)
     return {
         "input_tokens": sess.get("input_tokens", 0),
         "output_tokens": sess.get("output_tokens", 0),
@@ -373,19 +506,19 @@ async def session_usage(request: Request, session_id: str):
 
 @router.post("/api/session/new")
 async def create_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
-    session_id = _new_session(payload)
+    session_id = _new_session(payload, owner)
     logger.info("WebUI session created: %s", session_id)
     return {"ok": True, "session": _summary(session_id)}
 
 
 @router.post("/api/session/rename")
 async def rename_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     title = payload.get("title")
     if not isinstance(title, str) or not title.strip():
         return _json_error("title is required")
@@ -396,10 +529,10 @@ async def rename_webui_session(request: Request):
 
 @router.post("/api/session/delete")
 async def delete_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     session_store._SESSIONS.pop(sid, None)
     session_store._MESSAGES.pop(sid, None)
     session_store._save_data()
@@ -409,10 +542,10 @@ async def delete_webui_session(request: Request):
 
 @router.post("/api/session/clear")
 async def clear_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     session_store._MESSAGES[sid] = []
     _touch(sid)
     return {"ok": True, "session": _detail(sid)}
@@ -420,10 +553,10 @@ async def clear_webui_session(request: Request):
 
 @router.post("/api/session/pin")
 async def pin_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     sess["pinned"] = bool(payload.get("pinned", True))
     _touch(sid)
     return {"ok": True, "session": _summary(sid)}
@@ -431,10 +564,10 @@ async def pin_webui_session(request: Request):
 
 @router.post("/api/session/archive")
 async def archive_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     sess["archived"] = bool(payload.get("archived", True))
     _touch(sid)
     return {"ok": True, "session": _summary(sid)}
@@ -442,13 +575,13 @@ async def archive_webui_session(request: Request):
 
 @router.post("/api/session/move")
 async def move_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     project_id = payload.get("project_id")
-    if project_id is not None and not any(p.get("project_id") == project_id for p in _WEBUI_STATE["projects"]):
-        return _json_error("Project not found", 404)
+    if project_id is not None:
+        _owned_project(str(project_id), owner)
     sess["project_id"] = project_id
     _touch(sid)
     return {"ok": True, "session": _summary(sid)}
@@ -456,10 +589,10 @@ async def move_webui_session(request: Request):
 
 @router.post("/api/session/branch")
 async def branch_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     parent_id = str(payload.get("session_id", ""))
-    parent = _session(parent_id)
+    parent = _owned_session(parent_id, owner)
     keep_count = payload.get("keep_count")
     source = list(_messages(parent_id))
     if keep_count is not None:
@@ -473,7 +606,7 @@ async def branch_webui_session(request: Request):
         "model": parent.get("model"),
         "model_provider": parent.get("model_provider"),
         "profile": parent.get("profile"),
-    })
+    }, owner)
     session_store._MESSAGES[child_id] = [dict(item) for item in source]
     session_store._SESSIONS[child_id]["parent_session_id"] = parent_id
     session_store._save_data()
@@ -482,10 +615,10 @@ async def branch_webui_session(request: Request):
 
 @router.post("/api/session/truncate")
 async def truncate_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     try:
         keep_count = max(0, int(payload.get("keep_count")))
     except (TypeError, ValueError):
@@ -497,10 +630,10 @@ async def truncate_webui_session(request: Request):
 
 @router.post("/api/session/update")
 async def update_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     for key in ("workspace", "model", "model_provider", "profile"):
         if key in payload:
             sess[key] = payload[key]
@@ -510,55 +643,74 @@ async def update_webui_session(request: Request):
 
 @router.post("/api/session/compress")
 async def compress_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    detail = _detail(sid)
-    return {"ok": True, "session": detail, "summary": {"headline": "No compression required", "token_line": ""}}
+    _owned_session(sid, owner)
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": {
+                "code": "compression_unsupported",
+                "message": "The configured Hermes session store does not support compression",
+            },
+            "session": _detail(sid),
+        },
+        status_code=409,
+    )
 
 
 @router.post("/api/session/undo")
 async def undo_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     items = _messages(sid)
-    removed = items.pop() if items else None
+    removed_items = []
+    while items and items[-1].get("role") == "assistant":
+        removed_items.append(items.pop())
+    if items and items[-1].get("role") == "user":
+        removed_items.append(items.pop())
     _touch(sid)
-    return {"ok": True, "removed_count": 1 if removed else 0, "removed_preview": _message_text(removed)[:200] if removed else ""}
+    preview = next((_message_text(item) for item in removed_items if item.get("role") == "user"), "")
+    return {"ok": True, "removed_count": len(removed_items), "removed_preview": preview[:200]}
 
 
 @router.post("/api/session/retry")
 async def retry_webui_session(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     items = _messages(sid)
     while items and items[-1].get("role") == "assistant":
         items.pop()
     last_user = next((_message_text(item) for item in reversed(items) if item.get("role") == "user"), "")
+    if not last_user:
+        return _json_error("No user message is available to retry", 400)
     _touch(sid)
-    return {"ok": True, "last_user_text": last_user, "removed_count": 0}
+    stream_id = _queue_chat_stream(sid, owner)
+    return {"ok": True, "session_id": sid, "stream_id": stream_id, "last_user_text": last_user, "removed_count": 0}
 
 
 @router.api_route("/api/session/yolo", methods=["GET", "POST"])
 async def session_yolo(request: Request, session_id: Optional[str] = None):
-    _require_access(request)
+    owner = _require_access(request)
     if request.method == "POST":
         payload = await _body(request)
         session_id = str(payload.get("session_id", ""))
-        _session(session_id)["yolo"] = bool(payload.get("enabled", False))
+        _owned_session(session_id, owner)["yolo"] = bool(payload.get("enabled", False))
         _touch(session_id)
     if not session_id:
         return {"enabled": False}
-    return {"session_id": session_id, "enabled": bool(_session(session_id).get("yolo", False))}
+    return {"session_id": session_id, "enabled": bool(_owned_session(session_id, owner).get("yolo", False))}
 
 
 @router.get("/api/session/export")
 async def export_webui_session(request: Request, session_id: str, format: str = "json"):
-    _require_access(request)
+    owner = _require_access(request)
+    _owned_session(session_id, owner)
     detail = _detail(session_id)
     if format == "json":
         return Response(json.dumps(detail, ensure_ascii=False, indent=2), media_type="application/json")
@@ -582,20 +734,36 @@ def _project(project_id: str) -> Dict[str, Any]:
     raise HTTPException(status_code=404, detail="Project not found")
 
 
+def _owned_project(project_id: str, owner: str) -> Dict[str, Any]:
+    project = _project(project_id)
+    stored_owner = project.get("webui_owner")
+    if stored_owner is None:
+        project["webui_owner"] = owner
+        _save_state()
+    elif stored_owner != owner:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
 @router.get("/api/projects")
 async def list_projects(request: Request):
-    _require_access(request)
-    return {"projects": list(_WEBUI_STATE["projects"])}
+    owner = _require_access(request)
+    projects = []
+    for project in _WEBUI_STATE["projects"]:
+        if project.get("webui_owner") not in {None, owner}:
+            continue
+        projects.append(_owned_project(project["project_id"], owner))
+    return {"projects": projects}
 
 
 @router.post("/api/projects/create")
 async def create_project(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
         return _json_error("name is required")
-    project = {"project_id": f"proj_{secrets.token_hex(10)}", "name": name.strip()[:120], "color": payload.get("color"), "created_at": _now()}
+    project = {"project_id": f"proj_{secrets.token_hex(10)}", "name": name.strip()[:120], "color": payload.get("color"), "created_at": _now(), "webui_owner": owner}
     async with _STATE_LOCK:
         _WEBUI_STATE["projects"].append(project)
         _save_state()
@@ -604,9 +772,9 @@ async def create_project(request: Request):
 
 @router.post("/api/projects/rename")
 async def rename_project(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
-    project = _project(str(payload.get("project_id", "")))
+    project = _owned_project(str(payload.get("project_id", "")), owner)
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
         return _json_error("name is required")
@@ -619,10 +787,10 @@ async def rename_project(request: Request):
 
 @router.post("/api/projects/delete")
 async def delete_project(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     pid = str(payload.get("project_id", ""))
-    _project(pid)
+    _owned_project(pid, owner)
     _WEBUI_STATE["projects"] = [p for p in _WEBUI_STATE["projects"] if p.get("project_id") != pid]
     for sess in session_store._SESSIONS.values():
         if sess.get("project_id") == pid:
@@ -635,6 +803,32 @@ async def delete_project(request: Request):
 # ---------------------------------------------------------------------------
 # Chat and file-backed SSE streams
 # ---------------------------------------------------------------------------
+
+
+def _queue_chat_stream(session_id: str, owner: str) -> str:
+    sess = _owned_session(session_id, owner)
+    existing_stream = sess.get("active_stream_id")
+    existing_meta = _read_stream_meta(existing_stream) if existing_stream else None
+    if existing_meta and existing_meta.get("status") in {"starting", "running"}:
+        raise HTTPException(status_code=409, detail="A response is already running for this session")
+    stream_id = secrets.token_urlsafe(24)
+    sess["active_stream_id"] = stream_id
+    meta = {
+        "stream_id": stream_id,
+        "session_id": session_id,
+        "owner": owner,
+        "status": "starting",
+        "seq": 0,
+        "cancel_requested": False,
+        "created_at": _now(),
+    }
+    _write_stream_meta(stream_id, meta)
+    _stream_events_path(stream_id).write_text("", encoding="utf-8")
+    _touch(session_id)
+    task = asyncio.create_task(_chat_worker(stream_id, owner), name=f"hermes-webui-stream-{stream_id}")
+    _STREAM_TASKS[stream_id] = task
+    logger.info("WebUI stream queued: %s", stream_id)
+    return stream_id
 
 
 def _stream_path(stream_id: str, suffix: str) -> Path:
@@ -682,6 +876,18 @@ async def _publish(stream_id: str, event: str, payload: Dict[str, Any], status: 
         with _stream_events_path(stream_id).open("a", encoding="utf-8") as output:
             output.write(json.dumps(event_record, ensure_ascii=False, separators=(",", ":")) + "\n")
             output.flush()
+        # Replay is durable, but it must remain bounded for long-running
+        # streams. Sequence numbers remain monotonic even when old records
+        # are trimmed.
+        try:
+            events_file = _stream_events_path(stream_id)
+            lines = events_file.read_text(encoding="utf-8").splitlines()
+            if len(lines) > MAX_REPLAY_EVENTS:
+                temporary = events_file.with_suffix(".tmp")
+                temporary.write_text("\n".join(lines[-MAX_REPLAY_EVENTS:]) + "\n", encoding="utf-8")
+                os.replace(temporary, events_file)
+        except OSError:
+            logger.warning("Unable to trim WebUI replay state: %s", stream_id)
         if status:
             meta["status"] = status
         _write_stream_meta(stream_id, meta)
@@ -718,7 +924,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
     if not meta:
         return
     session_id = meta["session_id"]
-    sess = _session(session_id)
+    sess = _owned_session(session_id, owner)
     assistant_text = []
     reasoning_text = []
     had_error = False
@@ -857,8 +1063,8 @@ async def start_webui_chat(request: Request):
         return _json_error("message is required")
     session_id = str(payload.get("session_id") or payload.get("conversation_id") or "")
     if not session_id:
-        session_id = _new_session(payload)
-    sess = _session(session_id)
+        session_id = _new_session(payload, owner)
+    sess = _owned_session(session_id, owner)
     existing_stream = sess.get("active_stream_id")
     existing_meta = _read_stream_meta(existing_stream) if existing_stream else None
     if existing_meta and existing_meta.get("status") in {"starting", "running"}:
@@ -875,15 +1081,7 @@ async def start_webui_chat(request: Request):
         if names:
             text += "\n\n[Attached files: " + ", ".join(names) + "]"
     _messages(session_id).append({"id": f"msg_{secrets.token_hex(12)}", "role": "user", "content": text, "timestamp": _now(), "attachments": attachments})
-    sess["active_stream_id"] = secrets.token_urlsafe(24)
-    stream_id = sess["active_stream_id"]
-    meta = {"stream_id": stream_id, "session_id": session_id, "owner": owner, "status": "starting", "seq": 0, "cancel_requested": False, "created_at": _now()}
-    _write_stream_meta(stream_id, meta)
-    _stream_events_path(stream_id).write_text("", encoding="utf-8")
-    _touch(session_id)
-    task = asyncio.create_task(_chat_worker(stream_id, owner), name=f"hermes-webui-stream-{stream_id}")
-    _STREAM_TASKS[stream_id] = task
-    logger.info("WebUI stream queued: %s", stream_id)
+    stream_id = _queue_chat_stream(session_id, owner)
     return {"stream_id": stream_id, "session_id": session_id}
 
 
@@ -964,10 +1162,10 @@ async def chat_stream_status(request: Request, stream_id: str):
 
 @router.post("/api/chat/steer")
 async def steer_webui_chat(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    sess = _session(sid)
+    sess = _owned_session(sid, owner)
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
         return _json_error("text is required")
@@ -1039,6 +1237,18 @@ def _safe_upload_name(raw_name: Any) -> str:
     return filename
 
 
+def _safe_upload_target(root: Path, filename: str) -> Path:
+    destination = root / "uploads"
+    destination.mkdir(parents=True, exist_ok=True)
+    resolved_destination = destination.resolve()
+    if destination.is_symlink() or not _within(resolved_destination, root):
+        raise HTTPException(status_code=403, detail="Upload directory is outside the workspace")
+    target = destination / filename
+    if not _within(target.resolve(), root):
+        raise HTTPException(status_code=403, detail="Upload path is outside the workspace")
+    return target
+
+
 def _check_upload_length(request: Request) -> None:
     raw_length = request.headers.get("content-length")
     try:
@@ -1096,9 +1306,11 @@ def _workspace_path(session_id: Optional[str], raw_path: Optional[str] = None, m
     parts = Path(raw).parts
     if ".." in parts:
         raise HTTPException(status_code=400, detail="Path traversal is not allowed")
+    if Path(raw).is_absolute():
+        raise HTTPException(status_code=400, detail="Absolute paths are not allowed")
     if any(_is_sensitive_name(part) or part.startswith(".") for part in parts if part not in {".", "/"}):
         raise HTTPException(status_code=403, detail="Access to private files is not allowed")
-    candidate = Path(raw).expanduser() if Path(raw).is_absolute() else root / raw
+    candidate = root / raw
     candidate = candidate.resolve()
     if not any(_within(candidate, allowed) for allowed in roots):
         raise HTTPException(status_code=403, detail="Path is outside the workspace")
@@ -1187,7 +1399,8 @@ async def reorder_workspaces(request: Request):
 
 @router.get("/api/list")
 async def list_workspace_directory(request: Request, session_id: str, path: Optional[str] = None):
-    _require_access(request)
+    owner = _require_access(request)
+    _owned_session(session_id, owner)
     directory = _workspace_path(session_id, path, must_exist=True)
     if not directory.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
@@ -1205,7 +1418,8 @@ async def list_workspace_directory(request: Request, session_id: str, path: Opti
 
 @router.get("/api/file")
 async def read_workspace_file(request: Request, session_id: str, path: str):
-    _require_access(request)
+    owner = _require_access(request)
+    _owned_session(session_id, owner)
     target = _workspace_path(session_id, path, must_exist=True)
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
@@ -1220,7 +1434,8 @@ async def read_workspace_file(request: Request, session_id: str, path: str):
 
 @router.get("/api/file/raw")
 async def raw_workspace_file(request: Request, session_id: str, path: str):
-    _require_access(request)
+    owner = _require_access(request)
+    _owned_session(session_id, owner)
     target = _workspace_path(session_id, path, must_exist=True)
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
@@ -1229,7 +1444,7 @@ async def raw_workspace_file(request: Request, session_id: str, path: str):
 
 @router.post("/api/upload")
 async def upload_workspace_file(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     _check_upload_length(request)
     if not request.headers.get("content-type", "").startswith("multipart/"):
         payload = await _body(request)
@@ -1244,15 +1459,14 @@ async def upload_workspace_file(request: Request):
         return _json_error("file is required")
     session_id = str(form.get("session_id") or "")
     if not session_id:
-        session_id = _new_session({})
+        session_id = _new_session({}, owner)
+    _owned_session(session_id, owner)
     root = _workspace_path(session_id)
-    destination = root / "uploads"
-    destination.mkdir(parents=True, exist_ok=True)
     filename = _safe_upload_name(uploaded.filename)
-    target = destination / filename
+    target = _safe_upload_target(root, filename)
     counter = 1
     while target.exists():
-        target = destination / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
+        target = _safe_upload_target(root, f"{Path(filename).stem}-{counter}{Path(filename).suffix}")
         counter += 1
     total = 0
     try:
@@ -1277,7 +1491,7 @@ async def upload_workspace_file(request: Request):
 
 @router.post("/api/upload/extract")
 async def extract_uploaded_file(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     _check_upload_length(request)
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("multipart/"):
@@ -1287,15 +1501,14 @@ async def extract_uploaded_file(request: Request):
             return _json_error("file is required")
         session_id = str(form.get("session_id") or "")
         if not session_id:
-            session_id = _new_session({})
+            session_id = _new_session({}, owner)
+        _owned_session(session_id, owner)
         root = _workspace_path(session_id)
-        destination = root / "uploads"
-        destination.mkdir(parents=True, exist_ok=True)
         filename = _safe_upload_name(uploaded.filename)
-        target = destination / filename
+        target = _safe_upload_target(root, filename)
         counter = 1
         while target.exists():
-            target = destination / f"{Path(filename).stem}-{counter}{Path(filename).suffix}"
+            target = _safe_upload_target(root, f"{Path(filename).stem}-{counter}{Path(filename).suffix}")
             counter += 1
         total = 0
         with target.open("wb") as output:
@@ -1312,7 +1525,9 @@ async def extract_uploaded_file(request: Request):
         result = {"path": str(target.relative_to(root))}
     else:
         payload = await _body(request)
-        target = _workspace_path(str(payload.get("session_id", "")), str(payload.get("path", "")), must_exist=True)
+        session_id = str(payload.get("session_id", ""))
+        _owned_session(session_id, owner)
+        target = _workspace_path(session_id, str(payload.get("path", "")), must_exist=True)
         result = {"path": str(target)}
     if target.stat().st_size > MAX_PREVIEW_BYTES:
         return _json_error("File is too large for extraction", 413)
@@ -1364,10 +1579,10 @@ async def webui_personalities(request: Request):
 
 @router.post("/api/personality/set")
 async def set_webui_personality(request: Request):
-    _require_access(request)
+    owner = _require_access(request)
     payload = await _body(request)
     sid = str(payload.get("session_id", ""))
-    _session(sid)
+    _owned_session(sid, owner)
     return {"ok": True, "personality": payload.get("name")}
 
 
