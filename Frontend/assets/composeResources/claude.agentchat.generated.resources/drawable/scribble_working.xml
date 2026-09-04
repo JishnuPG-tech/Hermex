@@ -1,0 +1,18 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="56dp"
+    android:height="56dp"
+    android:viewportWidth="56"
+    android:viewportHeight="56">
+    <!--
+      Path data copied verbatim from the web implementation's
+      WORKING_SCRIBBLE_PATH, where it is rendered with an animated
+      stroke-dashoffset. This drawable is the static copy; the Android
+      animated rendering is the code/ui StatusScribble composable
+      (PathMeasure trim window).
+    -->
+    <path
+        android:pathData="M3 35.5C6.16667 33.5 13.1 28.2 15.5 23C14.5 27.6667 13.2 36.8 16 36C18.8 35.2 25.8333 26.6667 29 22.5C27.1667 27.8333 24.4 38.1 28 36.5C32.5 34.5 41 25.5 43.5 22.5C44 22.5 38.5 36 41.5 36.5C44.5 37 49 34 52.5 31"
+        android:strokeColor="#000000"
+        android:strokeWidth="3.111"
+        android:strokeLineCap="round"/>
+</vector>

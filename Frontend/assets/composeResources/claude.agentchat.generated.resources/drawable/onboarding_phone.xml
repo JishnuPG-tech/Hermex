@@ -1,0 +1,100 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="63dp"
+    android:height="96dp"
+    android:viewportWidth="63"
+    android:viewportHeight="96">
+    <!--
+    Figma exports each rect with rotate(-7°) around its OWN top-left. The paths (notch, squiggles,
+    chat bubbles) have rotation already baked into their coordinates.
+
+    We wrap everything in one -7° group (pivot = body top-left) so the clip-path and rects can stay
+    unrotated. Rects that had a different SVG pivot are placed at their inverse-rotated local
+    position (they all landed on clean offsets: screen=body+3px inset, outline=body+0.75px inset,
+    input bar=body+6/70.5px). The already-baked paths go in a nested +7° group to cancel out.
+    -->
+    <group
+        android:rotation="-7"
+        android:pivotX="4.86"
+        android:pivotY="7.161">
+        <!-- Clip to phone body -->
+        <clip-path
+            android:pathData="M13.86,7.161 H39.36 A9,9 0 0,1 48.36,16.161 V79.161 A9,9 0 0,1 39.36,88.161 H13.86 A9,9 0 0,1 4.86,79.161 V16.161 A9,9 0 0,1 13.86,7.161 Z"/>
+        <!-- Body fill -->
+        <path
+            android:pathData="M13.86,7.161 H39.36 A9,9 0 0,1 48.36,16.161 V79.161 A9,9 0 0,1 39.36,88.161 H13.86 A9,9 0 0,1 4.86,79.161 V16.161 A9,9 0 0,1 13.86,7.161 Z"
+            android:fillColor="#FFFFFF"/>
+        <!-- Screen: local (7.86, 10.161) 37.5x75 rx=6 -->
+        <path
+            android:pathData="M13.86,10.161 H39.36 A6,6 0 0,1 45.36,16.161 V79.161 A6,6 0 0,1 39.36,85.161 H13.86 A6,6 0 0,1 7.86,79.161 V16.161 A6,6 0 0,1 13.86,10.161 Z"
+            android:fillColor="#F5F4ED"/>
+        <!-- Input bar fill: local (10.86, 77.661) 31.5x4.5 rx=2.25 -->
+        <path
+            android:pathData="M13.11,77.661 H40.11 A2.25,2.25 0 0,1 42.36,79.911 V79.911 A2.25,2.25 0 0,1 40.11,82.161 H13.11 A2.25,2.25 0 0,1 10.86,79.911 V79.911 A2.25,2.25 0 0,1 13.11,77.661 Z"
+            android:fillColor="#FFFFFF"/>
+        <!-- Input bar stroke: local (10.485, 77.286) 32.25x5.25 rx=2.625 -->
+        <path
+            android:pathData="M13.11,77.286 H40.11 A2.625,2.625 0 0,1 42.735,79.911 V79.911 A2.625,2.625 0 0,1 40.11,82.536 H13.11 A2.625,2.625 0 0,1 10.485,79.911 V79.911 A2.625,2.625 0 0,1 13.11,77.286 Z"
+            android:strokeColor="#261F1E1D"
+            android:strokeWidth="0.75"/>
+
+        <!-- Counter-rotation: these paths already have rotation baked in by Figma -->
+        <group
+            android:rotation="7"
+            android:pivotX="4.86"
+            android:pivotY="7.161">
+            <!-- Notch -->
+            <path
+                android:pathData="M18.202,7.034 L36.068,4.841 C36.269,6.485 35.1,7.982 33.456,8.184 L21.545,9.646 C19.9,9.848 18.404,8.679 18.202,7.034 Z"
+                android:fillColor="#BCBBBB"/>
+            <!-- Squiggly message lines -->
+            <path
+                android:pathData="M14.287,34.703 C15.025,34.612 15.604,33.947 15.875,33.011 C16.365,33.853 17.087,34.359 17.825,34.268 C18.564,34.178 19.142,33.512 19.413,32.577 C19.903,33.419 20.625,33.925 21.364,33.834 C22.102,33.743 22.68,33.078 22.952,32.142"
+                android:strokeColor="#4D1F1E1D"
+                android:strokeWidth="0.911"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"/>
+            <path
+                android:pathData="M26.883,31.66 C27.373,32.502 28.095,33.008 28.834,32.917 C29.572,32.827 30.15,32.161 30.422,31.226 C30.911,32.068 31.633,32.573 32.372,32.483 C33.11,32.392 33.689,31.727 33.96,30.791"
+                android:strokeColor="#4D1F1E1D"
+                android:strokeWidth="0.911"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"/>
+            <path
+                android:pathData="M14.837,39.185 C15.576,39.095 16.154,38.429 16.425,37.494 C16.915,38.336 17.637,38.841 18.376,38.751 C19.114,38.66 19.692,37.995 19.964,37.059 C20.453,37.901 21.175,38.407 21.914,38.316 C22.652,38.226 23.231,37.56 23.502,36.625"
+                android:strokeColor="#BCBBBB"
+                android:strokeWidth="0.911"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"/>
+            <path
+                android:pathData="M23.502,36.625 C23.991,37.467 24.714,37.973 25.452,37.882 C26.191,37.791 26.769,37.126 27.04,36.191 C27.53,37.033 28.252,37.538 28.99,37.448 C29.729,37.357 30.307,36.691 30.579,35.756"
+                android:strokeColor="#BCBBBB"
+                android:strokeWidth="0.911"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"/>
+            <path
+                android:pathData="M30.579,35.756 C31.068,36.598 31.79,37.104 32.529,37.013 C33.267,36.922 33.846,36.257 34.117,35.321 C34.606,36.163 35.329,36.669 36.067,36.579 C36.806,36.488 37.384,35.822 37.655,34.887"
+                android:strokeColor="#BCBBBB"
+                android:strokeWidth="0.911"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"/>
+            <!-- Chat bubbles -->
+            <path
+                android:pathData="M24.829,22.089 C24.576,20.034 26.038,18.163 28.094,17.91 L39.26,16.539 C41.727,16.236 43.972,17.99 44.275,20.457 L44.64,23.435 L29.008,25.354 C26.952,25.607 25.081,24.145 24.829,22.089 Z"
+                android:fillColor="#261F1E1D"/>
+            <path
+                android:pathData="M22.198,46.376 C21.895,43.909 23.65,41.664 26.116,41.361 L42.493,39.35 C44.96,39.047 47.205,40.801 47.508,43.268 L48.24,49.223 L27.396,51.783 C24.929,52.085 22.684,50.331 22.381,47.865 L22.198,46.376 Z"
+                android:fillColor="#261F1E1D"/>
+        </group>
+    </group>
+
+    <!-- Outline stroke: outside clip, local (5.61, 7.911) 42x79.5 rx=8.25 -->
+    <group
+        android:rotation="-7"
+        android:pivotX="4.86"
+        android:pivotY="7.161">
+        <path
+            android:pathData="M13.86,7.911 H39.36 A8.25,8.25 0 0,1 47.61,16.161 V79.161 A8.25,8.25 0 0,1 39.36,87.411 H13.86 A8.25,8.25 0 0,1 5.61,79.161 V16.161 A8.25,8.25 0 0,1 13.86,7.911 Z"
+            android:strokeColor="#4D1F1E1D"
+            android:strokeWidth="1.5"/>
+    </group>
+</vector>

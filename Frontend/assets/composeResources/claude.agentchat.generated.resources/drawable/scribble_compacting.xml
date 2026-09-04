@@ -1,0 +1,18 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="56dp"
+    android:height="56dp"
+    android:viewportWidth="56"
+    android:viewportHeight="56">
+    <!--
+      Path data copied verbatim from the web implementation's
+      COMPACTING_SCRIBBLE_PATH, where it is rendered with an animated
+      stroke-dashoffset. This drawable is the static copy; it has no
+      Android animated counterpart (the code/ui StatusScribble composable
+      renders only the working zigzag and the coil).
+    -->
+    <path
+        android:pathData="M6 29.8544H10.5C11.25 29.8544 12.75 29.2586 12.75 26.8752C12.75 24.4918 13.25 22.4064 13.5 21.6616C14.25 20.9168 15.9 19.8741 16.5 21.6616C17.1 23.4491 16.25 29.8544 15.75 32.8336C15.5 35.068 15.3 39.8347 16.5 41.0264C18 42.516 19.5 42.516 21 38.0472C22.2 34.4722 22 22.6547 21.75 17.1928C21.75 14.4619 22.5 9 25.5 9C28.5 9 28.25 14.9584 27.75 17.9376C27.25 25.1373 26.55 40.2816 27.75 43.2608C29.25 46.9848 29.25 46.9848 30 46.9848C30.75 46.9848 31.5 47.7296 32.25 38.792C32.25 37.0045 32.75 27.62 33 23.3995C33.25 22.6547 33.9 21.6119 34.5 23.3995C35.1 25.187 35.25 31.0957 35.25 33.8267C35.25 34.5715 35.55 35.9121 36.75 35.3163C38.25 34.5715 39 29.3579 39 26.3787C39 23.3995 40.5 20.4203 40.5 24.1443C40.5 27.8683 40.5 29.3579 42.75 29.3579H51"
+        android:strokeColor="#000000"
+        android:strokeWidth="3.111"
+        android:strokeLineCap="round"/>
+</vector>

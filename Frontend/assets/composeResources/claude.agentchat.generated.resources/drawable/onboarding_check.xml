@@ -1,0 +1,20 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="82dp"
+    android:height="42dp"
+    android:viewportWidth="82"
+    android:viewportHeight="42">
+    <!-- Background circle -->
+    <path
+        android:pathData="M40.6,0 A21,21 0 0,1 40.6,42 A21,21 0 0,1 40.6,0 Z"
+        android:fillColor="#262F7613"/>
+    <!-- Check icon -->
+    <path
+        android:pathData="M40.6,9.75 C46.813,9.75 51.85,14.787 51.85,21 C51.85,27.213 46.813,32.25 40.6,32.25 C34.387,32.25 29.35,27.213 29.35,21 C29.35,14.787 34.387,9.75 40.6,9.75 Z M45.569,16.664 C45.245,16.405 44.773,16.458 44.514,16.781 L39.037,23.627 L36.63,21.22 L36.513,21.123 C36.222,20.931 35.826,20.963 35.57,21.22 C35.313,21.476 35.281,21.872 35.473,22.163 L35.57,22.28 L38.57,25.28 L38.693,25.38 C38.825,25.465 38.981,25.507 39.141,25.499 C39.354,25.487 39.553,25.385 39.686,25.219 L45.686,17.719 C45.945,17.395 45.892,16.923 45.569,16.664 Z"
+        android:fillColor="#2F7613"/>
+    <!-- Dashed connector lines (left + right), stroke-dasharray="6 4.5" baked as explicit segments, opacity 0.6 baked into alpha -->
+    <path
+        android:pathData="M1.5,23.052 L7.481,22.566 M11.966,22.202 L14.956,21.96 M79.672,23.052 L73.692,22.567 M69.206,22.203 L66.216,21.96"
+        android:strokeColor="#992F7613"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"/>
+</vector>

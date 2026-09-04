@@ -1,0 +1,20 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="82dp"
+    android:height="42dp"
+    android:viewportWidth="82"
+    android:viewportHeight="42">
+    <!-- Background circle -->
+    <path
+        android:pathData="M40.6,0 A21,21 0 0,1 40.6,42 A21,21 0 0,1 40.6,0 Z"
+        android:fillColor="#26B53333"/>
+    <!-- X icon -->
+    <path
+        android:pathData="M40.127,9 C46.754,9 52.127,14.373 52.127,21 C52.127,27.627 46.754,33 40.127,33 C33.499,33 28.127,27.627 28.127,21 C28.127,14.373 33.499,9 40.127,9 Z M44.3,16.829 C43.861,16.39 43.148,16.39 42.709,16.829 L40.127,19.409 L37.546,16.829 C37.107,16.39 36.395,16.39 35.956,16.829 C35.516,17.268 35.516,17.981 35.956,18.42 L38.536,21 L35.956,23.581 C35.516,24.02 35.516,24.733 35.956,25.172 C36.395,25.611 37.107,25.611 37.546,25.172 L40.127,22.591 L42.709,25.172 C43.148,25.611 43.861,25.611 44.3,25.172 C44.739,24.733 44.739,24.02 44.3,23.581 L41.718,21 L44.3,18.42 C44.739,17.981 44.74,17.268 44.3,16.829 Z"
+        android:fillColor="#B53333"/>
+    <!-- Dashed connector lines (left + right), stroke-dasharray="6 4.5" baked as explicit segments, opacity 0.6 baked into alpha -->
+    <path
+        android:pathData="M1.5,23.052 L7.481,22.566 M11.966,22.202 L14.956,21.96 M79.672,23.052 L73.692,22.567 M69.206,22.203 L66.216,21.96"
+        android:strokeColor="#99B53333"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"/>
+</vector>

@@ -1,0 +1,14 @@
+{
+  "name": "ignis-obsidian",
+  "version": "1.0.0",
+  "description": "Headless Obsidian vault manager with LiveSync WebSocket",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "archiver": "^6.0.0",
+    "ws": "^8.16.0"
+  }
+}
