@@ -38,7 +38,7 @@ python3 /app/hermes_core/agent.py > /dev/stdout 2>&1 &
 HERMES_PID=$!
 
 # Step 7: Start Telegram Bot Handler (Background if token provided)
-if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -f "/app/hermes_core/telegram_bot.py" ]; then
     echo "[INIT] Starting Hermes Telegram Bot listener..."
     python3 /app/hermes_core/telegram_bot.py > /dev/stdout 2>&1 &
     TG_PID=$!

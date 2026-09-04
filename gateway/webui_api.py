@@ -1,87 +1,4 @@
-"""Hermes WebUI compatibility adapter.
 
-This module deliberately owns only /api/* WebUI routes. The existing /v1/*
-proxy and Anthropic-compatible routes are not changed.
-"""
-from __future__ import annotations
-
-import asyncio
-import base64
-import hashlib
-import hmac
-import json
-import logging
-import mimetypes
-import os
-import re
-import secrets
-import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import quote, urlsplit, urlunsplit
-
-import httpx
-from fastapi import APIRouter, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-
-from gateway import sessions_api as session_store
-
-router = APIRouter(tags=["Hermes WebUI"])
-logger = logging.getLogger("hermes.webui")
-
-# The WebUI preference/project state is small metadata. Conversation messages
-# continue to use the existing sessions_api JSON store at /data/sessions.
-_DATA_ROOT = Path(os.getenv("HERMES_WEBUI_DATA_DIR", "/data/hermes/webui"))
-if not Path("/data").exists() and "HERMES_WEBUI_DATA_DIR" not in os.environ:
-    _DATA_ROOT = Path("/tmp/hermes_webui")
-_DATA_ROOT.mkdir(parents=True, exist_ok=True)
-_STREAMS_DIR = _DATA_ROOT / "streams"
-_STREAMS_DIR.mkdir(parents=True, exist_ok=True)
-_STATE_FILE = _DATA_ROOT / "state.json"
-_STATE_LOCK = asyncio.Lock()
-_STREAM_LOCKS: Dict[str, asyncio.Lock] = {}
-_STREAM_TASKS: Dict[str, asyncio.Task] = {}
-
-MAX_UPLOAD_BYTES = int(os.getenv("HERMES_WEBUI_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
-MAX_PREVIEW_BYTES = 2 * 1024 * 1024
-SESSION_TOKEN_MAX_AGE = 60 * 60 * 24 * 30
-STREAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-_SENSITIVE_NAMES = {
-    ".env", ".env.local", ".env.production", ".git", ".gitconfig",
-    "id_rsa", "id_ed25519", "credentials.json", "service-account.json",
-}
-_EXECUTABLE_SUFFIXES = {
-    ".apk", ".bat", ".cmd", ".com", ".dll", ".dylib", ".exe", ".jar",
-    ".js", ".msi", ".php", ".pl", ".py", ".rb", ".sh", ".so",
-}
-
-_DEFAULT_STATE: Dict[str, Any] = {
-    "projects": [],
-    "workspaces": [],
-    "default_model": None,
-    "reasoning_effort": "medium",
-    "reasoning_display": "off",
-    "settings": {
-        "show_cli_sessions": False,
-        "show_claude_code_sessions": False,
-    },
-    "profiles": [],
-}
-
-
-def _load_state() -> Dict[str, Any]:
-    try:
-        if _STATE_FILE.exists():
-            raw = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                state = dict(_DEFAULT_STATE)
-                state.update(raw)
-                return state
-    except (OSError, ValueError, TypeError):
-        pass
-    return dict(_DEFAULT_STATE)
 
 
 _WEBUI_STATE = _load_state()
@@ -183,6 +100,18 @@ def _request_token(request: Request) -> Optional[str]:
 
 
 def _require_access(request: Request) -> str:
+    origin = request.headers.get("origin")
+    if origin:
+        allowed = {
+            value.strip().rstrip("/")
+            for value in os.getenv("HERMES_WEBUI_ALLOWED_ORIGINS", "").split(",")
+            if value.strip()
+        }
+        forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip()
+        forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc)).split(",", 1)[0].strip()
+        request_origin = f"{forwarded_proto}://{forwarded_host}"
+        if origin.rstrip("/") != request_origin.rstrip("/") and origin.rstrip("/") not in allowed:
+            raise HTTPException(status_code=403, detail="Request origin is not allowed")
     token = _request_token(request)
     if not _valid_session_token(token):
         raise HTTPException(status_code=401, detail="WebUI authentication required")
@@ -196,7 +125,8 @@ async def auth_status(request: Request):
     enabled = _auth_enabled()
     return {
         "auth_enabled": enabled,
-        "password_auth_enabled": enabled,
+        "password_auth_enabled": bool(_password()),
+        "api_key_auth_enabled": bool(_api_key()),
         "logged_in": (not enabled) or _valid_session_token(_request_token(request)),
     }
 
@@ -797,12 +727,16 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
         logger.info("WebUI stream started: %s", stream_id)
         meta["status"] = "running"
         _write_stream_meta(stream_id, meta)
-        backend = os.getenv("HERMES_WEBUI_CHAT_BACKEND", "gateway").strip().lower()
+        # Use the existing Hermes runtime by default so WebUI chats get the
+        # same tools, fallback model logic, and upstream behavior as /v1/chat.
+        backend = os.getenv("HERMES_WEBUI_CHAT_BACKEND", "hermes").strip().lower()
         request_body = {
             "messages": _agent_messages(session_id),
             "model": sess.get("model") or _default_model(),
             "temperature": 0.7,
         }
+        if sess.get("system"):
+            request_body["system"] = str(sess["system"])
         headers = {}
         gateway_key = os.getenv("HERMES_WEBUI_GATEWAY_API_KEY", os.getenv("API_SERVER_KEY", "")).strip()
         if gateway_key:
@@ -819,7 +753,7 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
             async with client.stream("POST", endpoint, json=request_body, headers=headers) as upstream:
                 if upstream.status_code >= 400:
                     had_error = True
-                    await _publish(stream_id, "error", {"error": "Hermes agent request failed", "session_id": session_id}, "error")
+                    await _publish(stream_id, "error", {"error": "Hermes agent request failed", "session_id": session_id})
                 else:
                     async for line in upstream.aiter_lines():
                         if _cancel_requested(stream_id):
@@ -867,14 +801,14 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
                             await _publish(stream_id, "tool_result", {k: v for k, v in item.items() if k != "type"})
                         elif kind == "error":
                             had_error = True
-                            await _publish(stream_id, "error", {"error": str(item.get("error", "Agent error")), "session_id": session_id}, "error")
+                            await _publish(stream_id, "error", {"error": str(item.get("error", "Agent error")), "session_id": session_id})
                             break
     except asyncio.CancelledError:
         cancelled = True
     except Exception:
         had_error = True
         logger.exception("WebUI stream failed: %s", stream_id)
-        await _publish(stream_id, "error", {"error": "Hermes agent is temporarily unavailable", "session_id": session_id}, "error")
+        await _publish(stream_id, "error", {"error": "Hermes agent is temporarily unavailable", "session_id": session_id})
     finally:
         if assistant_text or reasoning_text:
             message: Dict[str, Any] = {
@@ -890,20 +824,21 @@ async def _chat_worker(stream_id: str, owner: str) -> None:
         sess["active_stream_id"] = None
         _touch(session_id)
         if cancelled or _cancel_requested(stream_id):
-            await _publish(stream_id, "cancel", {"session_id": session_id}, "cancelled")
+            await _publish(stream_id, "cancel", {"session_id": session_id})
         elif not had_error:
             detail = _detail(session_id, include_messages=False)
-            await _publish(stream_id, "done", {"session_id": session_id, "session": detail, "usage": _session_usage_payload(sess)}, "done")
+            await _publish(stream_id, "done", {"session_id": session_id, "session": detail, "usage": _session_usage_payload(sess)})
+        terminal_status = "cancelled" if (cancelled or _cancel_requested(stream_id)) else ("error" if had_error else "completed")
+        if not had_error and not cancelled:
+            await _publish(stream_id, "stream_end", {"session_id": session_id}, terminal_status)
+        elif cancelled:
+            await _publish(stream_id, "stream_end", {"session_id": session_id}, terminal_status)
+        else:
+            await _publish(stream_id, "stream_end", {"session_id": session_id}, terminal_status)
         meta = _read_stream_meta(stream_id) or meta
-        meta["status"] = "cancelled" if (cancelled or _cancel_requested(stream_id)) else ("error" if had_error else "completed")
+        meta["status"] = terminal_status
         meta["finished_at"] = _now()
         _write_stream_meta(stream_id, meta)
-        if not had_error and not cancelled:
-            await _publish(stream_id, "stream_end", {"session_id": session_id}, "done")
-        elif cancelled:
-            await _publish(stream_id, "stream_end", {"session_id": session_id}, "cancelled")
-        else:
-            await _publish(stream_id, "stream_end", {"session_id": session_id}, "error")
         _STREAM_TASKS.pop(stream_id, None)
         _STREAM_LOCKS.pop(stream_id, None)
         logger.info("WebUI stream finished: %s (%s)", stream_id, meta.get("status"))
@@ -924,6 +859,10 @@ async def start_webui_chat(request: Request):
     if not session_id:
         session_id = _new_session(payload)
     sess = _session(session_id)
+    existing_stream = sess.get("active_stream_id")
+    existing_meta = _read_stream_meta(existing_stream) if existing_stream else None
+    if existing_meta and existing_meta.get("status") in {"starting", "running"}:
+        return _json_error("A response is already running for this session", 409)
     if payload.get("workspace") is not None:
         sess["workspace"] = payload.get("workspace")
     for key in ("model", "model_provider", "profile"):
@@ -987,7 +926,15 @@ async def stream_webui_chat(request: Request, stream_id: str, replay: int = 0, a
                 yield ": heartbeat\n\n"
             await asyncio.sleep(0.2)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.api_route("/api/chat/cancel", methods=["GET", "POST"])
@@ -1099,6 +1046,39 @@ def _check_upload_length(request: Request) -> None:
             raise HTTPException(status_code=413, detail="Upload exceeds the configured size limit")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid Content-Length header")
+
+
+def _legacy_upload_record(
+    file_name: str,
+    content: str,
+    file_type: str,
+    file_size: int,
+) -> Dict[str, Any]:
+    """Keep the pre-WebUI /api/upload response and /api/files lookup working."""
+    file_id = f"file_{secrets.token_hex(8)}"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = {
+        "id": file_id,
+        "uuid": file_id,
+        "file_uuid": file_id,
+        "file_name": file_name,
+        "filename": file_name,
+        "file_size": file_size,
+        "file_type": file_type,
+        "extracted_content": content,
+        "content": content,
+        "created_at": now,
+        "updated_at": now,
+        "status": "ready",
+    }
+    try:
+        from Backend.gateway import claude_rest_api as legacy
+        legacy._UPLOADED_FILES[file_id] = record
+    except Exception:
+        # The standalone WebUI deployment does not necessarily ship the
+        # optional Claude bridge; the durable workspace copy still succeeds.
+        pass
+    return record
 
 
 def _workspace_path(session_id: Optional[str], raw_path: Optional[str] = None, must_exist: bool = False) -> Path:
@@ -1251,6 +1231,13 @@ async def raw_workspace_file(request: Request, session_id: str, path: str):
 async def upload_workspace_file(request: Request):
     _require_access(request)
     _check_upload_length(request)
+    if not request.headers.get("content-type", "").startswith("multipart/"):
+        payload = await _body(request)
+        content = str(payload.get("content") or payload.get("extracted_content") or "")
+        file_name = _safe_upload_name(payload.get("file_name") or payload.get("filename") or "document.txt")
+        file_type = str(payload.get("file_type") or "text/plain")
+        record = _legacy_upload_record(file_name, content, file_type, len(content.encode("utf-8")))
+        return record
     form = await request.form()
     uploaded = form.get("file")
     if not isinstance(uploaded, UploadFile) and not hasattr(uploaded, "filename"):
@@ -1283,7 +1270,9 @@ async def upload_workspace_file(request: Request):
     finally:
         await uploaded.close()
     relative = str(target.relative_to(root))
-    return {"filename": target.name, "path": relative, "mime": getattr(uploaded, "content_type", None) or "application/octet-stream", "size": total, "is_image": (getattr(uploaded, "content_type", "") or "").startswith("image/")}
+    mime = getattr(uploaded, "content_type", None) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    record = _legacy_upload_record(target.name, "", mime, total)
+    return {**record, "filename": target.name, "path": relative, "mime": mime, "size": total, "is_image": mime.startswith("image/")}
 
 
 @router.post("/api/upload/extract")
@@ -1390,7 +1379,25 @@ async def media_workspace_file(request: Request, session_id: str, path: str):
 @router.get("/api/models")
 async def webui_models(request: Request):
     _require_access(request)
-    return {"models": _model_rows(), "providers": _provider_rows(), "groups": [], "active_provider": "omniroute", "default_model": _default_model()}
+    rows = _model_rows()
+    # /api/models existed in the Claude-compatible router before WebUI was
+    # added. Preserve its collection fields while exposing the WebUI view.
+    try:
+        from gateway.claude_rest_api import MODELS_CATALOG
+        legacy_models = list(MODELS_CATALOG)
+    except Exception:
+        legacy_models = []
+    return {
+        "models": rows,
+        "data": legacy_models,
+        "has_more": False,
+        "first_id": (legacy_models[0].get("model") if legacy_models else None),
+        "last_id": (legacy_models[-1].get("model") if legacy_models else None),
+        "providers": _provider_rows(),
+        "groups": [],
+        "active_provider": "omniroute",
+        "default_model": _default_model(),
+    }
 
 
 @router.get("/api/models/live")

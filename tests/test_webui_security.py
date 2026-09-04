@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEBUI = (ROOT / "gateway" / "webui_api.py").read_text(encoding="utf-8")
 MAIN = (ROOT / "gateway" / "main.py").read_text(encoding="utf-8")
 ENTRYPOINT = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
 
 class WebUISecurityRegressionTests(unittest.TestCase):
@@ -27,6 +28,12 @@ class WebUISecurityRegressionTests(unittest.TestCase):
     def test_streams_can_be_cancelled_at_task_level(self):
         self.assertIn("_STREAM_TASKS", WEBUI)
         self.assertIn("task.cancel()", WEBUI)
+        self.assertIn('"tool_call"', WEBUI)
+        self.assertIn('"tool_result"', WEBUI)
+
+    def test_browser_requests_have_origin_check(self):
+        self.assertIn("HERMES_WEBUI_ALLOWED_ORIGINS", WEBUI)
+        self.assertIn("Request origin is not allowed", WEBUI)
 
     def test_webui_router_is_registered_once_and_legacy_proxy_is_retained(self):
         self.assertEqual(MAIN.count("app.include_router(webui_router)"), 1)
@@ -36,6 +43,9 @@ class WebUISecurityRegressionTests(unittest.TestCase):
     def test_gateway_runs_one_worker_for_process_local_stream_state(self):
         self.assertIn("--workers 1", ENTRYPOINT)
         self.assertNotIn("--workers 2", ENTRYPOINT)
+
+    def test_production_image_contains_the_wrapper_dependency(self):
+        self.assertIn("COPY Backend/gateway/claude_rest_api.py", DOCKERFILE)
 
     def test_repository_has_no_known_committed_credential_literals(self):
         for path in ROOT.rglob("*"):

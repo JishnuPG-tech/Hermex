@@ -3,6 +3,7 @@ import time
 import uuid
 import datetime
 import logging
+import secrets
 from typing import Optional, Dict, Any, Union
 from fastapi import APIRouter, Request, HTTPException, Header, Response
 from pydantic import BaseModel, Field
@@ -13,7 +14,10 @@ logger = logging.getLogger("auth_api")
 router = APIRouter()
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "292824298430-113kq16cbpq6i02jin424gb1mk5ebm40.apps.googleusercontent.com")
-JWT_SECRET = os.getenv("HERMES_JWT_SECRET", os.getenv("JWT_SECRET", ""))
+# Production should set HERMES_JWT_SECRET in deployment secrets. A random
+# process-local fallback avoids a committed signing key while keeping local
+# authentication usable; tokens naturally expire when the process restarts.
+JWT_SECRET = os.getenv("HERMES_JWT_SECRET", os.getenv("JWT_SECRET", "")) or secrets.token_urlsafe(32)
 GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 
 ADMIN_EMAILS = {"jishnupg2005@gmail.com", "jishnu.pg@gmail.com"}
@@ -97,6 +101,8 @@ def create_session_token(user_data: Dict[str, Any]) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
+    if not JWT_SECRET:
+        return None
     try:
         if token.startswith("Bearer "):
             token = token[7:]
