@@ -2,6 +2,7 @@ import os
 import json
 import re
 import asyncio
+import time
 import httpx
 from typing import List, Dict, Any, AsyncGenerator, Optional
 from hermes_core.tools.registry import registry
@@ -593,6 +594,76 @@ async def chat_endpoint(request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    """OpenAI-compatible adapter used by the Telegram/channel gateway."""
+    data = await request.json()
+    messages = data.get("messages", [])
+    model = data.get("model")
+    system = data.get("system")
+    temperature = data.get("temperature", 0.7)
+    stream = bool(data.get("stream", True))
+    response_id = f"chatcmpl-hermes-{int(time.time() * 1000)}"
+    response_model = model or "hermes-agent"
+
+    if not stream:
+        text_parts = []
+        thinking_parts = []
+        error = None
+        async for item in agent.stream_chat(
+            messages,
+            model=model,
+            system=system,
+            temperature=temperature,
+        ):
+            if item.get("type") == "text":
+                text_parts.append(item.get("content", ""))
+            elif item.get("type") == "thinking":
+                thinking_parts.append(item.get("content", ""))
+            elif item.get("type") == "error":
+                error = item.get("error")
+        content = "".join(text_parts)
+        if error and not content:
+            content = f"⚠️ {error}"
+        message = {"role": "assistant", "content": content}
+        if thinking_parts:
+            message["reasoning_content"] = "".join(thinking_parts)
+        return JSONResponse({
+            "id": response_id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": response_model,
+            "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+        })
+
+    async def completion_events():
+        def chunk(delta: Dict[str, Any], finish_reason: Optional[str] = None) -> str:
+            return (
+                f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': response_model, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish_reason}]}, ensure_ascii=False)}\n\n"
+            )
+
+        yield chunk({"role": "assistant", "content": ""})
+        async for item in agent.stream_chat(
+            messages,
+            model=model,
+            system=system,
+            temperature=temperature,
+        ):
+            item_type = item.get("type")
+            content = item.get("content", "")
+            if item_type == "text" and content:
+                yield chunk({"content": content})
+            elif item_type == "thinking" and content:
+                yield chunk({"reasoning_content": content})
+            elif item_type == "error":
+                yield chunk({"content": f"⚠️ {item.get('error', 'Agent execution failed')}"})
+        yield chunk({}, "stop")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(completion_events(), media_type="text/event-stream")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8642)
