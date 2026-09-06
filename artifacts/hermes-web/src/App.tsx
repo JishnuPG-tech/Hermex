@@ -140,6 +140,7 @@ export function App() {
   const sourceRef = useRef<EventSource | null>(null);
   const streamIdRef = useRef<string | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const lastSeqRef = useRef(0);
 
   const refreshSessions = useCallback(async () => {
     const result = await api.sessions();
@@ -211,6 +212,7 @@ export function App() {
 
   function handleStreamEvent(event: StreamEvent) {
     setLastSeq((current) => Math.max(current, event.seq ?? 0));
+    if (event.seq) lastSeqRef.current = Math.max(lastSeqRef.current, event.seq);
     if (event.event === "token") {
       setStreamText((current) => current + String(event.data.text ?? ""));
     } else if (event.event === "reasoning") {
@@ -279,7 +281,7 @@ export function App() {
         setReconnecting(true);
         const delay = Math.min(1000 * 2 ** attempt, 10000);
         reconnectTimerRef.current = window.setTimeout(() => {
-          connectToStream(id, lastSeq, attempt + 1);
+          connectToStream(id, lastSeqRef.current, attempt + 1);
         }, delay);
       },
     );
@@ -298,6 +300,7 @@ export function App() {
     setTools([]);
     setArtifacts([]);
     setLastSeq(0);
+    lastSeqRef.current = 0;
     try {
       let conversationId = selectedId;
       if (!conversationId) {
