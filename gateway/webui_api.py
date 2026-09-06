@@ -435,7 +435,14 @@ def _new_session(payload: Optional[Dict[str, Any]] = None, owner: str = WEBUI_PR
 
 
 @router.get("/api/sessions")
-async def list_webui_sessions(request: Request, include_archived: int = 0, archived_limit: Optional[int] = None):
+async def list_webui_sessions(
+    request: Request,
+    include_archived: int = 0,
+    archived_limit: Optional[int] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    order: str = "created",
+):
     owner = _require_access(request)
     values = []
     for sid in list(session_store._SESSIONS):
@@ -449,6 +456,40 @@ async def list_webui_sessions(request: Request, include_archived: int = 0, archi
     values.sort(key=lambda item: (item.get("pinned", False), item.get("updated_at", 0)), reverse=True)
     if include_archived and archived_limit:
         values = values[: max(1, min(archived_limit, 200))]
+    # The official Hermes dashboard uses the same resource path with
+    # pagination parameters. Preserve the Hermex adapter response for its
+    # existing client, and return the upstream contract when those parameters
+    # are present.
+    if limit is not None:
+        page_limit = max(1, min(limit, 100))
+        ordered = sorted(
+            values,
+            key=lambda item: item.get("created_at", 0) if order == "created" else item.get("updated_at", 0),
+            reverse=order != "created",
+        )
+        return {
+            "sessions": [
+                {
+                    "id": item["session_id"],
+                    "source": "webui",
+                    "model": item.get("model"),
+                    "title": item.get("title"),
+                    "started_at": item.get("created_at", 0),
+                    "ended_at": None,
+                    "last_active": item.get("updated_at", 0),
+                    "is_active": bool(item.get("is_streaming")),
+                    "message_count": item.get("message_count", 0),
+                    "tool_call_count": 0,
+                    "input_tokens": item.get("input_tokens", 0),
+                    "output_tokens": item.get("output_tokens", 0),
+                    "preview": _message_text(_messages(item["session_id"])[-1]) if _messages(item["session_id"]) else None,
+                }
+                for item in ordered[offset : offset + page_limit]
+            ],
+            "total": len(ordered),
+            "limit": page_limit,
+            "offset": max(0, offset),
+        }
     return {
         "sessions": values,
         "cli_count": 0,
@@ -478,7 +519,29 @@ async def search_webui_sessions(request: Request, q: str = "", content: int = 0,
         if not needle or needle in haystack:
             summary["match_type"] = "content" if content and needle in haystack else "title"
             found.append(summary)
-    return {"sessions": found, "query": q, "count": len(found)}
+    official_results = []
+    for item in found:
+        session_id = item["session_id"]
+        official_results.append({
+            "id": session_id,
+            "source": "webui",
+            "model": item.get("model"),
+            "title": item.get("title"),
+            "started_at": item.get("created_at", 0),
+            "ended_at": None,
+            "last_active": item.get("updated_at", 0),
+            "is_active": bool(item.get("is_streaming")),
+            "message_count": item.get("message_count", 0),
+            "tool_call_count": 0,
+            "input_tokens": item.get("input_tokens", 0),
+            "output_tokens": item.get("output_tokens", 0),
+            "preview": _message_text(_messages(session_id)[-1]) if _messages(session_id) else None,
+            "session_id": session_id,
+            "snippet": _message_text(_messages(session_id)[-1]) if _messages(session_id) else "",
+            "role": _messages(session_id)[-1].get("role") if _messages(session_id) else None,
+            "session_started": item.get("created_at", 0),
+        })
+    return {"sessions": found, "results": official_results, "query": q, "count": len(found)}
 
 
 @router.get("/api/session")

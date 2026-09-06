@@ -5,13 +5,14 @@ WORKDIR /web
 RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
-COPY artifacts/hermes-web/package.json artifacts/hermes-web/package.json
+COPY official/web/package.json official/web/package.json
+COPY official/apps/shared/package.json official/apps/shared/package.json
 
 RUN pnpm install --frozen-lockfile
 
-COPY artifacts/hermes-web artifacts/hermes-web
+COPY official official
 
-RUN pnpm --filter @workspace/hermes-web run build
+RUN pnpm --filter web run build
 
 FROM python:3.11-slim-bookworm
 
@@ -58,7 +59,7 @@ COPY Backend/gateway/anthropic_bridge.py /app/Backend/gateway/anthropic_bridge.p
 COPY Backend/gateway/claude_rest_api.py /app/Backend/gateway/claude_rest_api.py
 COPY hermes_core /app/hermes_core
 COPY ignis /app/ignis
-COPY --from=web-build /web/artifacts/hermes-web/dist /app/web
+COPY --from=web-build /web/build/hermes-dashboard /app/web
 COPY health_doctor.py /app/health_doctor.py
 COPY nginx.conf /app/nginx.conf
 COPY entrypoint.sh /app/entrypoint.sh

@@ -2,3 +2,6 @@ files.zip
 node_modules/
 artifacts/*/dist/
 artifacts/*/*.tsbuildinfo
+build/
+official/web/node_modules/
+official/apps/shared/node_modules/

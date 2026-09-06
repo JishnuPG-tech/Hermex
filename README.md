@@ -94,6 +94,12 @@ these process-local caches remain consistent while `/data` provides restart
 persistence. The existing OpenAI-compatible API remains at
 `https://jishnupg-hermes.hf.space/v1`.
 
+The production browser UI is the official upstream Hermes dashboard at
+`/dashboard/`, built from `official/web`. The compatibility/API layer and
+upstream pin are documented in `docs/OFFICIAL_HERMES_DASHBOARD.md`. The
+historical `artifacts/hermes-web` source is not copied, built, or served by
+the production image.
+
 The repository root (`Dockerfile`, `entrypoint.sh`, `nginx.conf`, and
 `gateway/`) is the Hugging Face deployment source of truth. `Backend/` is
 retained as the older standalone gateway source; the root image copies only
@@ -109,5 +115,7 @@ repository root:
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q gateway hermes_core
+pnpm --filter web run typecheck
+pnpm --filter web run build
 git diff --check
 ```
