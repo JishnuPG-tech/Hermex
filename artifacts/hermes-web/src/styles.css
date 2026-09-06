@@ -94,6 +94,31 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .message.user { margin-left: 12%; padding: 14px 17px; border-radius: 16px; background: #28231f; }
 .message-role { margin-bottom: 9px; font-size: 10px; }
 .message-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+.markdown { white-space: normal; }
+.markdown p { margin: 0 0 12px; }
+.markdown p:last-child { margin-bottom: 0; }
+.markdown h1, .markdown h2, .markdown h3 { margin: 20px 0 9px; font-family: Georgia, serif; font-weight: 400; }
+.markdown h1 { font-size: 26px; }
+.markdown h2 { font-size: 22px; }
+.markdown h3 { font-size: 18px; }
+.markdown ul { margin: 0 0 14px; padding-left: 24px; }
+.markdown li { margin: 5px 0; }
+.markdown code { border: 1px solid #463a32; border-radius: 5px; padding: 2px 5px; color: #e9b18d; background: #211c18; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .9em; }
+.markdown pre, .artifact-card pre { overflow: auto; margin: 14px 0; padding: 15px; border: 1px solid #3d342d; border-radius: 11px; color: #e6d5c7; background: #13110f; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; line-height: 1.6; white-space: pre; }
+.markdown a { color: #e8a37d; }
+.tool-stack { display: grid; gap: 7px; margin: 12px 0; }
+.tool-card { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid #41362e; border-radius: 10px; background: #211c18; color: #d8c7b8; }
+.tool-card > span { color: #e5a07c; }
+.tool-card.complete > span { color: #8bcba1; }
+.tool-card.failed > span { color: #ff9e8e; }
+.tool-card strong, .tool-card small { display: block; }
+.tool-card strong { font-size: 12px; }
+.tool-card small { margin-top: 4px; overflow: hidden; color: #8f8177; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-stack { margin: 10px 0 25px; }
+.artifact-card { margin-top: 8px; border: 1px solid #47392f; border-radius: 11px; background: #211c18; }
+.artifact-card summary { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 12px 14px; list-style: none; }
+.artifact-card summary small { margin-left: auto; color: #8f8177; }
+.artifact-card pre { margin: 0; border: 0; border-top: 1px solid #3d342d; border-radius: 0 0 11px 11px; }
 .assistant .message-content { color: #f3ece4; }
 .reasoning { margin: 0 0 13px; padding: 10px 13px; border-left: 2px solid #a86f59; color: #a99989; font-size: 13px; }
 .reasoning summary { cursor: pointer; color: #c38a70; }
@@ -104,6 +129,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .composer-wrap { width: min(880px, 100%); margin: 0 auto; padding: 12px clamp(20px, 7vw, 100px) 24px; }
 .composer-wrap textarea { display: block; width: 100%; min-height: 54px; resize: vertical; line-height: 1.5; }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 3px 0; color: #766d65; font-size: 11px; }
+.attach-button { cursor: pointer; color: #b99d8d; }
+.attach-button input { display: none; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.attachment-list span { padding: 5px 9px; border: 1px solid #4c3d33; border-radius: 999px; color: #c8ad9d; background: #211c18; font-size: 11px; }
 .composer-actions button { padding: 8px 14px; }
 .stop-button { color: #ffd4c4; background: #67392f; }
 

@@ -32,6 +32,16 @@ export type StreamEvent = {
   seq?: number;
 };
 
+export type UploadedFile = {
+  id?: string;
+  file_name?: string;
+  filename?: string;
+  path?: string;
+  mime?: string;
+  size?: number;
+  status?: string;
+};
+
 type RawSession = Omit<SessionSummary, "id"> & {
   id?: string;
   session_id?: string;
@@ -87,6 +97,20 @@ export const api = {
       body: JSON.stringify({ title: "New conversation" }),
     });
     return { ...result, session: normalizeSession(result.session) };
+  },
+  upload: async (file: File, sessionId: string | null) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (sessionId) form.append("session_id", sessionId);
+    const response = await fetch("/api/upload", {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || `Upload failed with HTTP ${response.status}`);
+    }
+    return (await response.json()) as UploadedFile;
   },
   startChat: (sessionId: string | null, message: string) =>
     request<{ stream_id: string; session_id: string }>("/api/chat/start", {

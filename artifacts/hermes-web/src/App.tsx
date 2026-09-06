@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   AuthStatus,
@@ -6,7 +6,22 @@ import {
   SessionDetail,
   SessionSummary,
   StreamEvent,
+  UploadedFile,
 } from "./api";
+
+type ToolItem = {
+  id: string;
+  name: string;
+  status: "running" | "complete" | "failed";
+  summary: string;
+};
+
+type ArtifactItem = {
+  id: string;
+  name: string;
+  type: string;
+  content: string;
+};
 
 type ChatItem = {
   id: string;
@@ -15,6 +30,82 @@ type ChatItem = {
   reasoning?: string;
   toolCount?: number;
 };
+
+function inlineMarkdown(text: string) {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index}>{part.slice(1, -1)}</code>;
+    }
+    const bold = part.match(/^\*\*(.+)\*\*$/);
+    if (bold) return <strong key={index}>{bold[1]}</strong>;
+    const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (link && /^https?:\/\//.test(link[2])) {
+      return <a key={index} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>;
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const blocks: ReactElement[] = [];
+  let list: string[] = [];
+  let code: string[] | null = null;
+  let language = "";
+
+  const flushList = () => {
+    if (!list.length) return;
+    blocks.push(
+      <ul key={`list-${blocks.length}`}>
+        {list.map((item, index) => <li key={index}>{inlineMarkdown(item)}</li>)}
+      </ul>,
+    );
+    list = [];
+  };
+
+  lines.forEach((line, index) => {
+    if (line.startsWith("```")) {
+      flushList();
+      if (code) {
+        blocks.push(
+          <pre key={`code-${index}`} data-language={language}>
+            <code>{code.join("\n")}</code>
+          </pre>,
+        );
+        code = null;
+        language = "";
+      } else {
+        code = [];
+        language = line.slice(3).trim();
+      }
+      return;
+    }
+    if (code) {
+      code.push(line);
+      return;
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet) {
+      list.push(bullet[1]);
+      return;
+    }
+    flushList();
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const Tag = `h${heading[1].length}` as "h1" | "h2" | "h3";
+      blocks.push(<Tag key={`heading-${index}`}>{inlineMarkdown(heading[2])}</Tag>);
+    } else if (line.trim()) {
+      blocks.push(<p key={`paragraph-${index}`}>{inlineMarkdown(line)}</p>);
+    }
+  });
+  flushList();
+  const unfinishedCode = code as string[] | null;
+  if (unfinishedCode !== null) {
+    blocks.push(<pre key="unfinished-code"><code>{unfinishedCode.join("\n")}</code></pre>);
+  }
+  return <div className="markdown">{blocks}</div>;
+}
 
 function toChatItems(session: SessionDetail | null): ChatItem[] {
   return (session?.messages ?? [])
@@ -41,9 +132,14 @@ export function App() {
   const [streamText, setStreamText] = useState("");
   const [thinking, setThinking] = useState("");
   const [toolCount, setToolCount] = useState(0);
+  const [tools, setTools] = useState<ToolItem[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [reconnecting, setReconnecting] = useState(false);
   const [lastSeq, setLastSeq] = useState(0);
   const sourceRef = useRef<EventSource | null>(null);
   const streamIdRef = useRef<string | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   const refreshSessions = useCallback(async () => {
     const result = await api.sessions();
@@ -78,7 +174,10 @@ export function App() {
     if (selectedId) void loadSession(selectedId);
   }, [selectedId, loadSession]);
 
-  useEffect(() => () => sourceRef.current?.close(), []);
+  useEffect(() => () => {
+    sourceRef.current?.close();
+    if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
+  }, []);
 
   const messages = useMemo(() => toChatItems(activeSession), [activeSession]);
 
@@ -111,13 +210,46 @@ export function App() {
   }
 
   function handleStreamEvent(event: StreamEvent) {
-    setLastSeq(event.seq ?? lastSeq);
+    setLastSeq((current) => Math.max(current, event.seq ?? 0));
     if (event.event === "token") {
       setStreamText((current) => current + String(event.data.text ?? ""));
     } else if (event.event === "reasoning") {
       setThinking((current) => current + String(event.data.text ?? ""));
-    } else if (event.event === "tool_call" || event.event === "tool_result") {
+    } else if (event.event === "tool_call") {
       setToolCount((current) => current + 1);
+      const toolId = String(event.data.id ?? event.data.tool_use_id ?? `tool-${Date.now()}`);
+      setTools((current) => [
+        ...current,
+        {
+          id: toolId,
+          name: String(event.data.name ?? event.data.tool ?? "Hermes tool"),
+          status: "running",
+          summary: String(event.data.input ?? event.data.command ?? "Working…"),
+        },
+      ]);
+    } else if (event.event === "tool_result") {
+      const toolId = String(event.data.id ?? event.data.tool_use_id ?? "");
+      setTools((current) => current.map((tool) =>
+        !toolId || tool.id === toolId
+          ? { ...tool, status: event.data.error ? "failed" : "complete", summary: String(event.data.output ?? event.data.result ?? "Completed") }
+          : tool,
+      ));
+      const rawArtifact = event.data.artifact ?? event.data.artifacts;
+      const candidates = Array.isArray(rawArtifact) ? rawArtifact : rawArtifact ? [rawArtifact] : [];
+      for (const candidate of candidates) {
+        if (typeof candidate === "object" && candidate !== null) {
+          const item = candidate as Record<string, unknown>;
+          setArtifacts((current) => [
+            ...current,
+            {
+              id: String(item.id ?? `artifact-${Date.now()}-${current.length}`),
+              name: String(item.name ?? item.filename ?? "Generated artifact"),
+              type: String(item.type ?? item.language ?? "text"),
+              content: String(item.content ?? ""),
+            },
+          ]);
+        }
+      }
     } else if (event.event === "error") {
       setError(String(event.data.error ?? "Hermes returned an error"));
     } else if (event.event === "done") {
@@ -128,16 +260,28 @@ export function App() {
       sourceRef.current = null;
       streamIdRef.current = null;
       setStreamId(null);
+      setReconnecting(false);
     }
   }
 
-  function connectToStream(id: string, afterSeq = 0) {
+  function connectToStream(id: string, afterSeq = 0, attempt = 0) {
     sourceRef.current?.close();
     const source = openStream(
       id,
       afterSeq,
       handleStreamEvent,
-      () => setError("The stream disconnected. Retrying may replay the missed events."),
+      () => {
+        if (streamIdRef.current !== id || attempt >= 5) {
+          setError("The stream disconnected. Refresh the conversation to replay it.");
+          setReconnecting(false);
+          return;
+        }
+        setReconnecting(true);
+        const delay = Math.min(1000 * 2 ** attempt, 10000);
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connectToStream(id, lastSeq, attempt + 1);
+        }, delay);
+      },
     );
     sourceRef.current = source;
   }
@@ -151,13 +295,33 @@ export function App() {
     setStreamText("");
     setThinking("");
     setToolCount(0);
+    setTools([]);
+    setArtifacts([]);
     setLastSeq(0);
     try {
-      const result = await api.startChat(selectedId, message);
+      let conversationId = selectedId;
+      if (!conversationId) {
+        const created = await api.createSession();
+        conversationId = created.session.id;
+        setSessions((current) => [created.session, ...current]);
+        setSelectedId(conversationId);
+        await loadSession(conversationId);
+      }
+      const uploaded: UploadedFile[] = [];
+      for (const file of attachments) {
+        uploaded.push(await api.upload(file, conversationId));
+      }
+      const result = await api.startChat(
+        conversationId,
+        uploaded.length
+          ? `${message}\n\n[Attached files: ${uploaded.map((file) => file.filename ?? file.file_name ?? "file").join(", ")}]`
+          : message,
+      );
       if (!selectedId) setSelectedId(result.session_id);
       setStreamId(result.stream_id);
       streamIdRef.current = result.stream_id;
       setDraft("");
+      setAttachments([]);
       connectToStream(result.stream_id);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to send message");
@@ -273,14 +437,42 @@ export function App() {
             <article className="message assistant live-message">
               <div className="message-role">Hermes <span className="live-label">LIVE</span></div>
               {thinking && <details className="reasoning" open><summary>Thinking</summary>{thinking}</details>}
-              {toolCount > 0 && <div className="tool-status">◌ Working with tools · {toolCount} events</div>}
-              <div className="message-content">{streamText || "Thinking…"}</div>
+              {reconnecting && <div className="tool-status">↻ Reconnecting and replaying missed events…</div>}
+              {tools.length > 0 && (
+                <div className="tool-stack">
+                  {tools.map((tool) => (
+                    <div className={`tool-card ${tool.status}`} key={tool.id}>
+                      <span>{tool.status === "running" ? "◌" : tool.status === "complete" ? "✓" : "!"}</span>
+                      <div><strong>{tool.name}</strong><small>{tool.summary}</small></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="message-content">
+                <MarkdownContent text={streamText || "Thinking…"} />
+              </div>
             </article>
+          )}
+          {artifacts.length > 0 && (
+            <section className="artifact-stack">
+              <div className="section-label">Artifacts</div>
+              {artifacts.map((artifact) => (
+                <details className="artifact-card" key={artifact.id}>
+                  <summary><span>▣</span><strong>{artifact.name}</strong><small>{artifact.type}</small></summary>
+                  <pre><code>{artifact.content}</code></pre>
+                </details>
+              ))}
+            </section>
           )}
           {error && <div className="inline-error">{error}</div>}
         </section>
 
         <form className="composer-wrap" onSubmit={sendMessage}>
+          {attachments.length > 0 && (
+            <div className="attachment-list">
+              {attachments.map((file) => <span key={file.name}>{file.name}</span>)}
+            </div>
+          )}
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -294,6 +486,14 @@ export function App() {
             rows={1}
           />
           <div className="composer-actions">
+            <label className="attach-button">
+              ＋ Attach
+              <input
+                type="file"
+                multiple
+                onChange={(event) => setAttachments(Array.from(event.target.files ?? []))}
+              />
+            </label>
             <span>Shift + Enter for a new line</span>
             {streamId ? (
               <button type="button" className="stop-button" onClick={stopMessage}>Stop</button>
