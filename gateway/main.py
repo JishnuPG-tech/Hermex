@@ -1,8 +1,9 @@
 import os
 import glob
 import time
+from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 
 from gateway.anthropic_bridge import router as anthropic_router
 from gateway.v1_sessions import router as v1_sessions_router
@@ -19,6 +20,8 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+WEB_APP_ROOT = Path(os.getenv("HERMES_WEB_APP_ROOT", "/app/web"))
 
 @app.middleware("http")
 async def normalize_hermes_paths(request: Request, call_next):
@@ -127,6 +130,34 @@ async def webmanifest():
         "theme_color": "#0f172a",
         "icons": [{"src": "/static/favicon.png", "sizes": "192x192", "type": "image/png"}],
     })
+
+
+@app.api_route("/app", methods=["GET", "HEAD"])
+@app.api_route("/app/", methods=["GET", "HEAD"])
+async def hermex_web_app():
+    index = WEB_APP_ROOT / "index.html"
+    if not index.exists():
+        return JSONResponse(
+            {"error": "Hermex Web App assets are not installed"},
+            status_code=503,
+        )
+    return FileResponse(index, media_type="text/html")
+
+
+@app.api_route("/app/{asset_path:path}", methods=["GET", "HEAD"])
+async def hermex_web_asset(asset_path: str):
+    """Serve the SPA bundle while preserving client-side deep links."""
+    candidate = (WEB_APP_ROOT / asset_path).resolve()
+    root = WEB_APP_ROOT.resolve()
+    if candidate.is_file() and (candidate == root or root in candidate.parents):
+        return FileResponse(candidate)
+    index = WEB_APP_ROOT / "index.html"
+    if index.exists():
+        return FileResponse(index, media_type="text/html")
+    return JSONResponse(
+        {"error": "Hermex Web App assets are not installed"},
+        status_code=503,
+    )
 
 
 @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
