@@ -11,6 +11,7 @@ import {
   StreamEvent,
   Task,
   UploadedFile,
+  WebUISettings,
 } from "./api";
 
 type ToolItem = {
@@ -35,7 +36,7 @@ type ChatItem = {
   toolCount?: number;
 };
 
-type WorkspaceView = "chat" | "projects" | "memory" | "goals";
+type WorkspaceView = "chat" | "projects" | "memory" | "goals" | "tasks" | "settings";
 
 function phase3Date(value?: number | string | null) {
   if (!value) return "—";
@@ -142,6 +143,7 @@ type Phase3PanelProps = {
   onCreateGoal: (event: FormEvent) => void;
   onCreateTask: (event: FormEvent, goalId?: string) => void;
   onForgetMemory: (memoryId: string) => void;
+  onStartTask: (task: Task) => void;
   onCompleteTask: (task: Task) => void;
   setMemoryQuery: (value: string) => void;
   setNewProjectName: (value: string) => void;
@@ -166,7 +168,7 @@ function Phase3Panel(props: Phase3PanelProps) {
       <header className="workspace-header">
         <div>
           <span className="eyebrow">HERMES WORKSPACE</span>
-          <h1>{view === "projects" ? "Projects" : view === "memory" ? "Persistent memory" : "Goals & task graph"}</h1>
+          <h1>{view === "projects" ? "Projects" : view === "memory" ? "Persistent memory" : view === "tasks" ? "Tasks" : "Goals & task graph"}</h1>
           <p className="muted">Durable state from Hermes, not a local-only dashboard.</p>
         </div>
         {loading && <span className="tool-status">Loading…</span>}
@@ -278,6 +280,74 @@ function Phase3Panel(props: Phase3PanelProps) {
           </div>
         </section>
       )}
+
+      {view === "tasks" && (
+        <section className="panel wide-panel">
+          <div className="panel-heading"><h2>{selectedProjectId ? "Project tasks" : "Tasks"}</h2><span>{visibleTasks.length}</span></div>
+          <form className="inline-form" onSubmit={(event) => props.onCreateTask(event)}>
+            <input value={newTaskTitle} onChange={(event) => props.setNewTaskTitle(event.target.value)} placeholder={selectedProjectId ? "New project task" : "New task"} aria-label="New task title" />
+            <button disabled={!newTaskTitle.trim()}>Add task</button>
+          </form>
+          <div className="task-list">
+            {visibleTasks.map((task) => (
+              <article className={`task-node ${task.status.toLowerCase()}`} key={task.id}>
+                <div className="task-node-main">
+                  <span className="task-marker">{task.status === "COMPLETED" ? "✓" : task.status === "READY" ? "●" : "○"}</span>
+                  <div><strong>{task.title}</strong><small>{task.status}{task.dependencies?.length ? ` · waits for ${task.dependencies.length}` : ""}</small></div>
+                </div>
+                <div className="task-actions">
+                  {task.status === "READY" && <button className="small-button" onClick={() => props.onStartTask(task)}>Start</button>}
+                  {task.status === "RUNNING" && <button className="small-button" onClick={() => props.onCompleteTask(task)}>Complete</button>}
+                </div>
+              </article>
+            ))}
+            {!visibleTasks.length && <div className="empty-state compact"><div className="empty-symbol">⌁</div><h2>No tasks yet</h2><p>Create a task here or add one to a goal in the task graph.</p></div>}
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+type SettingsPanelProps = {
+  settings: WebUISettings | null;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  onToggle: (key: "show_cli_sessions" | "show_claude_code_sessions", value: boolean) => void;
+};
+
+function SettingsPanel({ settings, loading, saving, error, onToggle }: SettingsPanelProps) {
+  return (
+    <section className="phase3-shell">
+      <header className="workspace-header">
+        <div>
+          <span className="eyebrow">HERMES WORKSPACE</span>
+          <h1>Settings</h1>
+          <p className="muted">Control what the existing WebUI shows. Provider credentials stay on the server.</p>
+        </div>
+        {(loading || saving) && <span className="tool-status">{saving ? "Saving…" : "Loading…"}</span>}
+      </header>
+      {error && <div className="inline-error">{error}</div>}
+      <section className="panel settings-panel">
+        {!settings ? (
+          <div className="empty-state compact"><div className="empty-symbol">⚙</div><h2>Settings unavailable</h2><p>Hermes could not load the persisted WebUI settings.</p></div>
+        ) : (
+          <>
+            <div className="settings-heading"><div><span className="eyebrow">WEBUI</span><h2>{settings.bot_name || "Hermes"}</h2></div><span className="settings-version">{settings.webui_version || "adapter"}</span></div>
+            <label className="setting-row">
+              <span><strong>Show CLI sessions</strong><small>Include CLI-created sessions in the conversation list.</small></span>
+              <input type="checkbox" checked={settings.show_cli_sessions} onChange={(event) => onToggle("show_cli_sessions", event.target.checked)} />
+            </label>
+            <label className="setting-row">
+              <span><strong>Show Claude Code sessions</strong><small>Include Claude Code sessions when the backend provides them.</small></span>
+              <input type="checkbox" checked={settings.show_claude_code_sessions} onChange={(event) => onToggle("show_claude_code_sessions", event.target.checked)} />
+            </label>
+            <div className="setting-note"><span>Default model</span><strong>{settings.default_model || "Server default"}</strong></div>
+            <div className="setting-note"><span>Provider</span><strong>{settings.default_model_provider || "omniroute"}</strong></div>
+          </>
+        )}
+      </section>
     </section>
   );
 }
@@ -320,12 +390,16 @@ export function App() {
   const [memoryQuery, setMemoryQuery] = useState("");
   const [goals, setGoals] = useState<Goal[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [settings, setSettings] = useState<WebUISettings | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [newMemoryContent, setNewMemoryContent] = useState("");
   const [newGoalTitle, setNewGoalTitle] = useState("");
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [phase3Loading, setPhase3Loading] = useState(false);
   const [phase3Error, setPhase3Error] = useState<string | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
   const streamIdRef = useRef<string | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -360,6 +434,18 @@ export function App() {
     }
   }, [memoryQuery]);
 
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    try {
+      setSettings(await api.settings());
+      setSettingsError(null);
+    } catch (cause) {
+      setSettingsError(cause instanceof Error ? cause.message : "Unable to load settings");
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
   const loadSession = useCallback(async (sessionId: string) => {
     const result = await api.session(sessionId);
     setActiveSession(result.session);
@@ -374,13 +460,14 @@ export function App() {
         if (!status.logged_in) return;
         await refreshSessions();
         await refreshPhase3();
+        await loadSettings();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "Unable to connect");
       } finally {
         setLoading(false);
       }
     })();
-  }, [refreshPhase3, refreshSessions]);
+  }, [loadSettings, refreshPhase3, refreshSessions]);
 
   useEffect(() => {
     if (selectedId) void loadSession(selectedId);
@@ -508,6 +595,29 @@ export function App() {
       if (selectedProjectId) await openProject(selectedProjectId);
     } catch (cause) {
       setPhase3Error(cause instanceof Error ? cause.message : "Unable to update task");
+    }
+  }
+
+  async function startTask(task: Task) {
+    try {
+      await api.startTask(task.id);
+      await refreshPhase3();
+      if (selectedProjectId) await openProject(selectedProjectId);
+    } catch (cause) {
+      setPhase3Error(cause instanceof Error ? cause.message : "Unable to start task");
+    }
+  }
+
+  async function toggleSetting(key: "show_cli_sessions" | "show_claude_code_sessions", value: boolean) {
+    if (!settings) return;
+    setSettingsSaving(true);
+    setSettingsError(null);
+    try {
+      setSettings(await api.updateSettings({ [key]: value }));
+    } catch (cause) {
+      setSettingsError(cause instanceof Error ? cause.message : "Unable to save settings");
+    } finally {
+      setSettingsSaving(false);
     }
   }
 
@@ -655,6 +765,7 @@ export function App() {
     setMemory([]);
     setGoals([]);
     setTasks([]);
+    setSettings(null);
     setView("chat");
   }
 
@@ -704,6 +815,8 @@ export function App() {
           <button className={view === "projects" ? "active" : ""} onClick={() => setView("projects")}>▦ Projects <span>{projects.length}</span></button>
           <button className={view === "memory" ? "active" : ""} onClick={() => setView("memory")}>◇ Memory <span>{memory.length}</span></button>
           <button className={view === "goals" ? "active" : ""} onClick={() => setView("goals")}>⌁ Goals <span>{goals.length}</span></button>
+          <button className={view === "tasks" ? "active" : ""} onClick={() => { setSelectedProjectId(null); setView("tasks"); }}>☷ Tasks <span>{tasks.length}</span></button>
+          <button className={view === "settings" ? "active" : ""} onClick={() => { setSelectedProjectId(null); setView("settings"); }}>⚙ Settings</button>
         </nav>
         <div className="section-label">Conversations</div>
         <div className="session-list">
@@ -726,7 +839,16 @@ export function App() {
       </aside>
 
       <main className="chat-shell">
-        {view !== "chat" && (
+        {view === "settings" && (
+          <SettingsPanel
+            settings={settings}
+            loading={settingsLoading}
+            saving={settingsSaving}
+            error={settingsError}
+            onToggle={toggleSetting}
+          />
+        )}
+        {view !== "chat" && view !== "settings" && (
           <Phase3Panel
             view={view}
             projects={projects}
@@ -750,6 +872,7 @@ export function App() {
             onCreateGoal={createGoal}
             onCreateTask={createTask}
             onForgetMemory={forgetMemory}
+            onStartTask={startTask}
             onCompleteTask={completeTask}
             setMemoryQuery={setMemoryQuery}
             setNewProjectName={setNewProjectName}

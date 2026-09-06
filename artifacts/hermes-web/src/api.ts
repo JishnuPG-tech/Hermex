@@ -102,6 +102,16 @@ export type Task = {
   summary?: string | null;
 };
 
+export type WebUISettings = {
+  webui_version?: string;
+  bot_name?: string;
+  theme?: string;
+  show_cli_sessions: boolean;
+  show_claude_code_sessions: boolean;
+  default_model?: string;
+  default_model_provider?: string;
+};
+
 type RawSession = Omit<SessionSummary, "id"> & {
   id?: string;
   session_id?: string;
@@ -237,6 +247,16 @@ export const api = {
   updateTask: (taskId: string, payload: Partial<Task>) =>
     request<{ ok: boolean; task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
       method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  startTask: (taskId: string) =>
+    request<{ ok: boolean; task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
+      method: "POST",
+    }),
+  settings: () => request<WebUISettings>("/api/settings"),
+  updateSettings: (payload: Partial<Pick<WebUISettings, "show_cli_sessions" | "show_claude_code_sessions">>) =>
+    request<WebUISettings>("/api/settings", {
+      method: "POST",
       body: JSON.stringify(payload),
     }),
 };

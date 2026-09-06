@@ -30,6 +30,16 @@ class WebAppContractTests(unittest.TestCase):
         self.assertIn("EventSource", api)
         self.assertIn("Hermex", app)
 
+    def test_web_app_exposes_tasks_and_persisted_settings(self):
+        api = (WEB / "src" / "api.ts").read_text(encoding="utf-8")
+        app = (WEB / "src" / "App.tsx").read_text(encoding="utf-8")
+        for marker in ("startTask", "settings", "updateSettings"):
+            self.assertIn(marker, api)
+        for label in ("Tasks", "Settings"):
+            self.assertIn(label, app)
+        self.assertIn("onStartTask", app)
+        self.assertIn("show_cli_sessions", app)
+
     def test_gateway_serves_web_app_without_changing_legacy_root(self):
         gateway = (ROOT / "gateway" / "main.py").read_text(encoding="utf-8")
         self.assertIn('"/app"', gateway)

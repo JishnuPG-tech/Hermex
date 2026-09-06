@@ -224,6 +224,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .task-node small { margin-top: 3px; color: #81756b; font-size: 10px; }
 .small-button { padding: 6px 9px; color: #e6c3b1; background: #4d3028; font-size: 10px; }
 .task-create button { padding: 7px 11px; }
+.task-list { display: grid; gap: 8px; margin-top: 16px; }
+.task-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.settings-panel { width: min(720px, 100%); margin: 0 auto; padding: 22px; }
+.settings-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 17px; border-bottom: 1px solid #3c322b; }
+.settings-heading h2 { margin: 7px 0 0; font-family: Georgia, serif; font-size: 22px; font-weight: 400; }
+.settings-version { color: #7f7369; font-size: 10px; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 17px 0; border-bottom: 1px solid #312a25; }
+.setting-row span { display: grid; gap: 5px; }
+.setting-row strong { color: #eaded5; font-size: 13px; font-weight: 500; }
+.setting-row small { color: #897d72; font-size: 11px; line-height: 1.5; }
+.setting-row input { width: 18px; height: 18px; accent-color: #d88967; }
+.setting-note { display: flex; justify-content: space-between; gap: 12px; padding-top: 15px; color: #8c7e73; font-size: 11px; }
+.setting-note strong { color: #d8c4b7; font-weight: 500; text-align: right; word-break: break-word; }
 
 @media (max-width: 720px) {
   .app-shell { display: block; }
@@ -252,4 +265,6 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .stat-row strong { font-size: 15px; }
   .stat-row span { font-size: 9px; }
   .memory-create { flex-direction: column; }
+  .settings-panel { padding: 16px; }
+  .setting-row { align-items: flex-start; }
 }
