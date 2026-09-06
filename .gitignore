@@ -1,4 +1,4 @@
 files.zip
 node_modules/
 artifacts/*/dist/
-artifacts/*/.tsbuildinfo
+artifacts/*/*.tsbuildinfo

@@ -7,6 +7,7 @@ export type AuthStatus = {
 
 export type SessionSummary = {
   id: string;
+  session_id?: string;
   title?: string;
   created_at?: string;
   updated_at?: string;
@@ -30,6 +31,18 @@ export type StreamEvent = {
   data: Record<string, unknown>;
   seq?: number;
 };
+
+type RawSession = Omit<SessionSummary, "id"> & {
+  id?: string;
+  session_id?: string;
+};
+
+function normalizeSession(session: RawSession): SessionSummary {
+  return {
+    ...session,
+    id: session.id ?? session.session_id ?? "",
+  };
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -60,17 +73,21 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/logout", {
       method: "POST",
     }),
-  sessions: () =>
-    request<{ sessions: SessionSummary[] }>("/api/sessions"),
+  sessions: async () => {
+    const result = await request<{ sessions: RawSession[] }>("/api/sessions");
+    return { ...result, sessions: result.sessions.map(normalizeSession) };
+  },
   session: (sessionId: string) =>
-    request<{ session: SessionDetail }>(
+    request<{ session: RawSession }>(
       `/api/session?session_id=${encodeURIComponent(sessionId)}&messages=1`,
-    ),
-  createSession: () =>
-    request<{ ok: boolean; session: SessionSummary }>("/api/session/new", {
+    ).then((result) => ({ session: normalizeSession(result.session) as SessionDetail })),
+  createSession: async () => {
+    const result = await request<{ ok: boolean; session: RawSession }>("/api/session/new", {
       method: "POST",
       body: JSON.stringify({ title: "New conversation" }),
-    }),
+    });
+    return { ...result, session: normalizeSession(result.session) };
+  },
   startChat: (sessionId: string | null, message: string) =>
     request<{ stream_id: string; session_id: string }>("/api/chat/start", {
       method: "POST",
