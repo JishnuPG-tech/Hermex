@@ -1,9 +1,10 @@
 import os
 import glob
 import time
+import json
 from pathlib import Path
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, RedirectResponse, Response
 
 from gateway.anthropic_bridge import router as anthropic_router
 from gateway.v1_sessions import router as v1_sessions_router
@@ -13,6 +14,7 @@ from gateway.ignis import router as ignis_router
 from gateway.claude_rest_api import router as claude_rest_router
 from gateway.telemetry import router as telemetry_router
 from gateway.webui_api import router as webui_router
+from gateway.hermes_dashboard_api import router as dashboard_api_router
 
 app = FastAPI(
     title="Hermes Agent Space Gateway",
@@ -21,7 +23,34 @@ app = FastAPI(
     redoc_url=None,
 )
 
-WEB_APP_ROOT = Path(os.getenv("HERMES_WEB_APP_ROOT", "/app/web"))
+DASHBOARD_ROOT = Path(os.getenv("HERMES_DASHBOARD_ROOT", "/app/web"))
+
+def _dashboard_index_response(index: Path, request: Request | None) -> HTMLResponse:
+    """Inject the dashboard's runtime base/auth settings without rebuilding it."""
+    html = index.read_text(encoding="utf-8")
+    token = ""
+    auth_required = False
+    if request is not None:
+        from gateway.webui_api import _auth_enabled, _request_token, _valid_session_token
+
+        candidate = _request_token(request)
+        if candidate and _valid_session_token(candidate):
+            token = candidate
+        auth_required = _auth_enabled()
+    # The gateway deliberately keeps the API at /api while the SPA is served
+    # from /dashboard, so the browser client must use the host root for API
+    # and WebSocket URLs.
+    base_path = ""
+    injected = (
+        f'<scr' + f'ipt>window.__HERMES_BASE_PATH__={json.dumps(base_path)};'
+        f'window.__HERMES_SESSION_TOKEN__={json.dumps(token)};'
+        f'window.__HERMES_AUTH_REQUIRED__={str(auth_required).lower()};</scr' + 'ipt>'
+    )
+    html = html.replace("</head>", f"{injected}</head>", 1)
+    return HTMLResponse(
+        html,
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 @app.middleware("http")
 async def normalize_hermes_paths(request: Request, call_next):
@@ -80,7 +109,7 @@ async def root():
             "anthropic_models": "/hermes/v1/models",
             "openai_chat": "/v1/chat/completions",
             "openai_models": "/v1/models",
-            "dashboard": "/dashboard",
+            "dashboard": "/dashboard/",
             "obsidian": "/obsidian",
             "logs": "/logs",
             "health": "/health/live",
@@ -132,31 +161,57 @@ async def webmanifest():
     })
 
 
-@app.api_route("/app", methods=["GET", "HEAD"])
-@app.api_route("/app/", methods=["GET", "HEAD"])
-async def hermex_web_app():
-    index = WEB_APP_ROOT / "index.html"
+@app.api_route("/dashboard", methods=["GET", "HEAD"])
+@app.api_route("/dashboard/", methods=["GET", "HEAD"])
+async def official_dashboard(request: Request):
+    index = DASHBOARD_ROOT / "index.html"
     if not index.exists():
         return JSONResponse(
-            {"error": "Hermex Web App assets are not installed"},
+            {"error": "Official Hermes dashboard assets are not installed"},
             status_code=503,
         )
-    return FileResponse(index, media_type="text/html")
+    return _dashboard_index_response(index, request)
 
 
-@app.api_route("/app/{asset_path:path}", methods=["GET", "HEAD"])
-async def hermex_web_asset(asset_path: str):
-    """Serve the SPA bundle while preserving client-side deep links."""
-    candidate = (WEB_APP_ROOT / asset_path).resolve()
-    root = WEB_APP_ROOT.resolve()
+@app.api_route("/dashboard/{asset_path:path}", methods=["GET", "HEAD"])
+async def official_dashboard_asset(request: Request, asset_path: str):
+    """Serve official Hermes assets and fall back only for SPA deep links."""
+    candidate = (DASHBOARD_ROOT / asset_path).resolve()
+    root = DASHBOARD_ROOT.resolve()
     if candidate.is_file() and (candidate == root or root in candidate.parents):
         return FileResponse(candidate)
-    index = WEB_APP_ROOT / "index.html"
+    index = DASHBOARD_ROOT / "index.html"
     if index.exists():
-        return FileResponse(index, media_type="text/html")
+        return _dashboard_index_response(index, request)
     return JSONResponse(
-        {"error": "Hermex Web App assets are not installed"},
+        {"error": "Official Hermes dashboard assets are not installed"},
         status_code=503,
+    )
+
+
+@app.api_route("/login", methods=["GET", "HEAD"])
+async def dashboard_login_page():
+    """Small server-side login bridge used by the official dashboard auth flow."""
+    if not os.getenv("HERMES_WEBUI_PASSWORD", "").strip():
+        return RedirectResponse("/dashboard/", status_code=303)
+    script_open = "<scr" + "ipt>"
+    script_close = "</scr" + "ipt>"
+    return HTMLResponse(
+        """<!doctype html>
+<html><head><meta charset="utf-8"><title>Hermes login</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font:16px system-ui;background:#0d1117;color:#f0f6fc;display:grid;place-items:center;min-height:100vh}
+form{display:grid;gap:14px;width:min(360px,90vw);padding:28px;border:1px solid #30363d;border-radius:12px}
+input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #484f58}button{cursor:pointer}</style>
+</head><body><form id="login">
+<h1>Hermes dashboard</h1><label>Password<input name="password" type="password" autofocus required></label>
+<button type="submit">Sign in</button><p id="error"></p></form>
+__SCRIPT_OPEN__document.querySelector("#login").addEventListener("submit",async(e)=>{e.preventDefault();
+const password=new FormData(e.currentTarget).get("password");const r=await fetch("/api/auth/login",
+{method:"POST",headers:{"content-type":"application/json"},credentials:"include",body:JSON.stringify({password})});
+if(r.ok) location.assign("/dashboard/"); else document.querySelector("#error").textContent="Invalid password";});__SCRIPT_CLOSE__
+</body></html>""".replace("__SCRIPT_OPEN__", script_open).replace("__SCRIPT_CLOSE__", script_close),
+        headers={"Cache-Control": "no-store, max-age=0"},
     )
 
 
@@ -235,6 +290,7 @@ app.include_router(telemetry_router)
 app.include_router(anthropic_router)
 app.include_router(v1_sessions_router)
 app.include_router(webui_router)
+app.include_router(dashboard_api_router)
 app.include_router(claude_rest_router)
 app.include_router(omniroute_router)
 app.include_router(ignis_router)

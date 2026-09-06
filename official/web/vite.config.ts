@@ -13,10 +13,42 @@ function compilerPreset() {
   }
   return preset;
 }
+
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 const BACKEND = process.env.HERMES_DASHBOARD_URL ?? "http://127.0.0.1:9119";
+
+function hermesProductionHtml(): Plugin {
+  return {
+    name: "hermes:production-html",
+    apply: "build",
+    generateBundle(_options, bundle) {
+      const styles = Object.values(bundle)
+        .filter(
+          (item) => item.type === "asset" && item.fileName.endsWith(".css"),
+        )
+        .map(
+          (item) =>
+            `<link rel="stylesheet" crossorigin href="/dashboard/${item.fileName}">`,
+        )
+        .join("\n    ");
+      const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/dashboard/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>Hermes Agent - Dashboard</title>
+    ${styles}
+    <link rel="preload" as="script" href="/dashboard/assets/dashboard.js" onload="this.onload=null;import(this.href)" />
+  </head>
+  <body><div id="root"></div></body>
+</html>`;
+      this.emitFile({ type: "asset", fileName: "index.html", source: html });
+    },
+  };
+}
 
 /**
  * In production the Python `hermes dashboard` server injects a one-shot
@@ -76,6 +108,7 @@ export default defineConfig({
     react(),
     babel({ presets: [compilerPreset()] }),
     tailwindcss(),
+    hermesProductionHtml(),
     hermesDevToken(),
   ],
   resolve: {
@@ -114,7 +147,9 @@ export default defineConfig({
     // imports in App.tsx create the route boundaries; these groups keep
     // shared node_modules out of every page chunk.
     rolldownOptions: {
+      input: path.resolve(__dirname, "./src/main.tsx"),
       output: {
+        entryFileNames: "assets/dashboard.js",
         codeSplitting: {
           minSize: 20_000,
           groups: [
