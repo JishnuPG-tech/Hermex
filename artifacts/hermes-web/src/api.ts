@@ -42,6 +42,66 @@ export type UploadedFile = {
   status?: string;
 };
 
+export type Project = {
+  project_id: string;
+  name: string;
+  description?: string;
+  instructions?: string;
+  color?: string | null;
+  archived?: boolean;
+  created_at?: number;
+  updated_at?: number;
+  session_count?: number;
+  file_count?: number;
+  goal_count?: number;
+  active_goal_count?: number;
+  task_count?: number;
+  completed_task_count?: number;
+};
+
+export type MemoryRecord = {
+  id: string;
+  content: string;
+  category?: string;
+  type?: string;
+  source?: string;
+  created_at?: number;
+  updated_at?: number;
+  project_id?: string | null;
+  session_id?: string | null;
+  confidence?: number | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type Goal = {
+  id: string;
+  title: string;
+  description?: string;
+  status: string;
+  priority?: string;
+  deadline?: string | null;
+  project_id?: string | null;
+  task_count?: number;
+  completed_task_count?: number;
+  progress?: number;
+};
+
+export type Task = {
+  id: string;
+  title: string;
+  description?: string;
+  status: string;
+  priority?: string;
+  goal_id?: string | null;
+  project_id?: string | null;
+  dependencies?: string[];
+  started_at?: number | null;
+  completed_at?: number | null;
+  error?: string | null;
+  result?: string | null;
+  summary?: string | null;
+};
+
 type RawSession = Omit<SessionSummary, "id"> & {
   id?: string;
   session_id?: string;
@@ -91,10 +151,10 @@ export const api = {
     request<{ session: RawSession }>(
       `/api/session?session_id=${encodeURIComponent(sessionId)}&messages=1`,
     ).then((result) => ({ session: normalizeSession(result.session) as SessionDetail })),
-  createSession: async () => {
+  createSession: async (projectId?: string | null) => {
     const result = await request<{ ok: boolean; session: RawSession }>("/api/session/new", {
       method: "POST",
-      body: JSON.stringify({ title: "New conversation" }),
+      body: JSON.stringify({ title: "New conversation", project_id: projectId ?? undefined }),
     });
     return { ...result, session: normalizeSession(result.session) };
   },
@@ -125,6 +185,60 @@ export const api = {
       `/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,
       { method: "POST" },
     ),
+  moveSession: (sessionId: string, projectId: string | null) =>
+    request<{ ok: boolean; session: RawSession }>("/api/session/move", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, project_id: projectId }),
+    }),
+  projects: () => request<{ projects: Project[] }>("/api/projects"),
+  createProject: (payload: { name: string; description?: string; instructions?: string }) =>
+    request<{ ok: boolean; project: Project }>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  project: (projectId: string) =>
+    request<{ project: Project & { sessions?: SessionSummary[]; files?: UploadedFile[]; memory?: MemoryRecord[]; goals?: Goal[]; tasks?: Task[] } }>(
+      `/api/projects/${encodeURIComponent(projectId)}`,
+    ),
+  updateProject: (projectId: string, payload: Partial<Project>) =>
+    request<{ ok: boolean; project: Project }>(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteProject: (projectId: string) =>
+    request<{ ok: boolean }>(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }),
+  memory: (query = "") =>
+    request<{ memory: MemoryRecord[]; count: number }>(`/api/memory?q=${encodeURIComponent(query)}`),
+  createMemory: (payload: { content: string; category?: string; project_id?: string | null }) =>
+    request<{ ok: boolean; memory: MemoryRecord }>("/api/memory", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteMemory: (memoryId: string) =>
+    request<{ ok: boolean }>(`/api/memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" }),
+  goals: (projectId?: string) =>
+    request<{ goals: Goal[] }>(`/api/goals${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
+  createGoal: (payload: { title: string; description?: string; project_id?: string | null }) =>
+    request<{ ok: boolean; goal: Goal }>("/api/goals", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  tasks: (filters: { projectId?: string; goalId?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.projectId) params.set("project_id", filters.projectId);
+    if (filters.goalId) params.set("goal_id", filters.goalId);
+    return request<{ tasks: Task[] }>(`/api/tasks${params.toString() ? `?${params.toString()}` : ""}`);
+  },
+  createTask: (payload: { title: string; goal_id?: string; project_id?: string; dependencies?: string[] }) =>
+    request<{ ok: boolean; task: Task }>("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateTask: (taskId: string, payload: Partial<Task>) =>
+    request<{ ok: boolean; task: Task }>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
 };
 
 export function openStream(

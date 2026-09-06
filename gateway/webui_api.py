@@ -66,6 +66,10 @@ WEBUI_PRINCIPAL = "webui-user"
 
 _DEFAULT_STATE: Dict[str, Any] = {
     "projects": [],
+    "memory": [],
+    "goals": [],
+    "tasks": [],
+    "files": [],
     "workspaces": [],
     "default_model": None,
     "reasoning_effort": "medium",
@@ -85,6 +89,12 @@ def _load_state() -> Dict[str, Any]:
             if isinstance(raw, dict):
                 state = json.loads(json.dumps(_DEFAULT_STATE))
                 state.update(raw)
+                # Phase 3 collections were added to the existing WebUI state
+                # file. Keeping defaults here makes the migration safe for
+                # installations that already have state.json.
+                for key in ("projects", "memory", "goals", "tasks", "files", "workspaces", "profiles"):
+                    if not isinstance(state.get(key), list):
+                        state[key] = []
                 return state
     except (OSError, ValueError, TypeError):
         pass
@@ -399,6 +409,9 @@ def _new_session(payload: Optional[Dict[str, Any]] = None, owner: str = WEBUI_PR
         existing.setdefault("webui_owner", owner)
         session_store._save_data()
         return session_id
+    project_id = payload.get("project_id")
+    if project_id is not None:
+        _owned_project(str(project_id), owner)
     now = _iso()
     session_store._SESSIONS[session_id] = {
         "id": session_id,
@@ -410,6 +423,7 @@ def _new_session(payload: Optional[Dict[str, Any]] = None, owner: str = WEBUI_PR
         "model": payload.get("model") or _default_model(),
         "model_provider": payload.get("model_provider") or "omniroute",
         "profile": payload.get("profile"),
+        "project_id": str(project_id) if project_id is not None else None,
         "pinned": False,
         "archived": False,
         "webui_owner": owner,
@@ -752,10 +766,11 @@ async def list_projects(request: Request):
     for project in _WEBUI_STATE["projects"]:
         if project.get("webui_owner") not in {None, owner}:
             continue
-        projects.append(_owned_project(project["project_id"], owner))
+        projects.append(_project_summary(_owned_project(project["project_id"], owner), owner))
     return {"projects": projects}
 
 
+@router.post("/api/projects")
 @router.post("/api/projects/create")
 async def create_project(request: Request):
     owner = _require_access(request)
@@ -763,11 +778,21 @@ async def create_project(request: Request):
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
         return _json_error("name is required")
-    project = {"project_id": f"proj_{secrets.token_hex(10)}", "name": name.strip()[:120], "color": payload.get("color"), "created_at": _now(), "webui_owner": owner}
+    project = {
+        "project_id": f"proj_{secrets.token_hex(10)}",
+        "name": name.strip()[:120],
+        "description": str(payload.get("description") or "")[:20000],
+        "instructions": str(payload.get("instructions") or "")[:20000],
+        "color": payload.get("color"),
+        "archived": False,
+        "created_at": _now(),
+        "updated_at": _now(),
+        "webui_owner": owner,
+    }
     async with _STATE_LOCK:
         _WEBUI_STATE["projects"].append(project)
         _save_state()
-    return {"ok": True, "project": project}
+    return {"ok": True, "project": _project_summary(project, owner)}
 
 
 @router.post("/api/projects/rename")
@@ -781,8 +806,9 @@ async def rename_project(request: Request):
     project["name"] = name.strip()[:120]
     if "color" in payload:
         project["color"] = payload["color"]
+    project["updated_at"] = _now()
     _save_state()
-    return {"ok": True, "project": project}
+    return {"ok": True, "project": _project_summary(project, owner)}
 
 
 @router.post("/api/projects/delete")
@@ -792,12 +818,676 @@ async def delete_project(request: Request):
     pid = str(payload.get("project_id", ""))
     _owned_project(pid, owner)
     _WEBUI_STATE["projects"] = [p for p in _WEBUI_STATE["projects"] if p.get("project_id") != pid]
+    _WEBUI_STATE["memory"] = [
+        item for item in _WEBUI_STATE.get("memory", [])
+        if not (item.get("project_id") == pid and item.get("webui_owner") == owner)
+    ]
+    goal_ids = {
+        item.get("id") for item in _WEBUI_STATE.get("goals", [])
+        if item.get("project_id") == pid and item.get("webui_owner") == owner
+    }
+    _WEBUI_STATE["goals"] = [
+        item for item in _WEBUI_STATE.get("goals", [])
+        if item.get("id") not in goal_ids
+    ]
+    _WEBUI_STATE["tasks"] = [
+        item for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("project_id") != pid and item.get("goal_id") not in goal_ids
+    ]
+    _WEBUI_STATE["files"] = [
+        item for item in _WEBUI_STATE.get("files", [])
+        if not (item.get("project_id") == pid and item.get("webui_owner") == owner)
+    ]
     for sess in session_store._SESSIONS.values():
         if sess.get("project_id") == pid:
             sess["project_id"] = None
     _save_state()
     session_store._save_data()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: project detail, persistent memory, goals, and task graphs
+# ---------------------------------------------------------------------------
+
+MEMORY_TYPES = {"personal", "project", "session", "goal", "task", "general"}
+GOAL_STATUSES = {"PLANNED", "ACTIVE", "BLOCKED", "PAUSED", "COMPLETED", "CANCELLED"}
+TASK_STATUSES = {"PENDING", "READY", "RUNNING", "BLOCKED", "WAITING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED"}
+TASK_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+
+
+def _phase3_id(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_hex(10)}"
+
+
+def _phase3_item(collection: str, item_id: str, owner: str) -> Dict[str, Any]:
+    for item in _WEBUI_STATE.get(collection, []):
+        if item.get("id") != item_id:
+            continue
+        stored_owner = item.get("webui_owner")
+        if stored_owner is None:
+            item["webui_owner"] = owner
+            _save_state()
+        elif stored_owner != owner:
+            raise HTTPException(status_code=404, detail=f"{collection[:-1].title()} not found")
+        return item
+    raise HTTPException(status_code=404, detail=f"{collection[:-1].title()} not found")
+
+
+def _project_summary(project: Dict[str, Any], owner: str) -> Dict[str, Any]:
+    pid = project["project_id"]
+    sessions = [
+        item for item in session_store._SESSIONS.values()
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    files = [
+        item for item in _WEBUI_STATE.get("files", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    goals = [
+        item for item in _WEBUI_STATE.get("goals", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    tasks = [
+        item for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    result = dict(project)
+    result.update({
+        "session_count": len(sessions),
+        "file_count": len(files),
+        "goal_count": len(goals),
+        "active_goal_count": sum(item.get("status") == "ACTIVE" for item in goals),
+        "task_count": len(tasks),
+        "completed_task_count": sum(item.get("status") == "COMPLETED" for item in tasks),
+    })
+    return result
+
+
+def _project_detail(project: Dict[str, Any], owner: str) -> Dict[str, Any]:
+    result = _project_summary(project, owner)
+    pid = project["project_id"]
+    result["sessions"] = [
+        _summary(session_id)
+        for session_id, item in session_store._SESSIONS.items()
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    result["files"] = [
+        dict(item) for item in _WEBUI_STATE.get("files", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    result["memory"] = [
+        dict(item) for item in _WEBUI_STATE.get("memory", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    result["goals"] = [_goal_summary(item, owner) for item in _WEBUI_STATE.get("goals", []) if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}]
+    result["tasks"] = [
+        dict(item) for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("project_id") == pid and item.get("webui_owner") in {None, owner}
+    ]
+    return result
+
+
+@router.get("/api/projects/{project_id}")
+async def get_project(request: Request, project_id: str):
+    owner = _require_access(request)
+    return {"project": _project_detail(_owned_project(project_id, owner), owner)}
+
+
+@router.patch("/api/projects/{project_id}")
+async def update_project(request: Request, project_id: str):
+    owner = _require_access(request)
+    project = _owned_project(project_id, owner)
+    payload = await _body(request)
+    if "name" in payload:
+        if not isinstance(payload["name"], str) or not payload["name"].strip():
+            return _json_error("name is required")
+        project["name"] = payload["name"].strip()[:120]
+    for key in ("description", "instructions", "color"):
+        if key in payload:
+            value = payload[key]
+            if key in {"description", "instructions"} and value is not None and not isinstance(value, str):
+                return _json_error(f"{key} must be a string")
+            project[key] = value[:20000] if isinstance(value, str) else value
+    if "archived" in payload:
+        project["archived"] = bool(payload["archived"])
+    project["updated_at"] = _now()
+    _save_state()
+    return {"ok": True, "project": _project_summary(project, owner)}
+
+
+@router.delete("/api/projects/{project_id}")
+async def delete_project_resource(request: Request, project_id: str):
+    owner = _require_access(request)
+    _owned_project(project_id, owner)
+    _WEBUI_STATE["projects"] = [p for p in _WEBUI_STATE["projects"] if p.get("project_id") != project_id]
+    goal_ids = {
+        item.get("id") for item in _WEBUI_STATE.get("goals", [])
+        if item.get("project_id") == project_id and item.get("webui_owner") == owner
+    }
+    for key in ("memory", "files"):
+        _WEBUI_STATE[key] = [
+            item for item in _WEBUI_STATE.get(key, [])
+            if not (item.get("project_id") == project_id and item.get("webui_owner") == owner)
+        ]
+    _WEBUI_STATE["goals"] = [item for item in _WEBUI_STATE.get("goals", []) if item.get("id") not in goal_ids]
+    _WEBUI_STATE["tasks"] = [
+        item for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("project_id") != project_id and item.get("goal_id") not in goal_ids
+    ]
+    for sess in session_store._SESSIONS.values():
+        if sess.get("project_id") == project_id:
+            sess["project_id"] = None
+    _save_state()
+    session_store._save_data()
+    return {"ok": True, "deleted_id": project_id}
+
+
+@router.get("/api/projects/{project_id}/sessions")
+async def project_sessions(request: Request, project_id: str):
+    owner = _require_access(request)
+    _owned_project(project_id, owner)
+    return {"sessions": [
+        _summary(session_id) for session_id, item in session_store._SESSIONS.items()
+        if item.get("project_id") == project_id and item.get("webui_owner") in {None, owner}
+    ]}
+
+
+@router.get("/api/projects/{project_id}/files")
+async def project_files(request: Request, project_id: str):
+    owner = _require_access(request)
+    _owned_project(project_id, owner)
+    return {"files": [
+        dict(item) for item in _WEBUI_STATE.get("files", [])
+        if item.get("project_id") == project_id and item.get("webui_owner") in {None, owner}
+    ]}
+
+
+def _memory_summary(item: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(item)
+    result.pop("webui_owner", None)
+    return result
+
+
+def _memory_matches(item: Dict[str, Any], query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join(str(item.get(key, "")) for key in ("content", "category", "type", "source", "session_id", "project_id"))
+    return query.lower() in haystack.lower()
+
+
+def _new_memory(payload: Dict[str, Any], owner: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    resolved_project_id = project_id or payload.get("project_id")
+    if resolved_project_id:
+        _owned_project(str(resolved_project_id), owner)
+    memory_type = str(payload.get("type") or ("project" if resolved_project_id else "personal")).lower()
+    if memory_type not in MEMORY_TYPES:
+        raise HTTPException(status_code=400, detail=f"type must be one of {sorted(MEMORY_TYPES)}")
+    session_id = payload.get("session_id")
+    if session_id:
+        _owned_session(str(session_id), owner)
+    now = _now()
+    item = {
+        "id": _phase3_id("mem"),
+        "content": content.strip()[:50000],
+        "category": str(payload.get("category") or memory_type)[:100],
+        "type": memory_type,
+        "source": str(payload.get("source") or "WebUI")[:200],
+        "created_at": now,
+        "updated_at": now,
+        "project_id": str(resolved_project_id) if resolved_project_id else None,
+        "session_id": str(session_id) if session_id else None,
+        "goal_id": payload.get("goal_id"),
+        "confidence": payload.get("confidence"),
+        "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        "webui_owner": owner,
+    }
+    _WEBUI_STATE.setdefault("memory", []).append(item)
+    _save_state()
+    # Keep the existing Hermes semantic index aware of WebUI-created memory.
+    try:
+        from hermes_core.tools.memory_tools import index_document_vector
+        index_document_vector(
+            source=f"webui_{memory_type}",
+            title=item["id"],
+            content=item["content"],
+            metadata={"memory_id": item["id"], "project_id": resolved_project_id, "owner": owner},
+        )
+    except Exception:
+        logger.debug("Semantic memory indexing unavailable", exc_info=True)
+    return item
+
+
+@router.get("/api/memory")
+async def list_memory(request: Request, q: str = "", project_id: Optional[str] = None, memory_type: Optional[str] = None, limit: int = 100):
+    owner = _require_access(request)
+    if project_id:
+        _owned_project(project_id, owner)
+    values = []
+    for item in _WEBUI_STATE.get("memory", []):
+        if item.get("webui_owner") not in {None, owner}:
+            continue
+        if project_id is not None and item.get("project_id") != project_id:
+            continue
+        if memory_type and item.get("type") != memory_type.lower():
+            continue
+        if _memory_matches(item, q.strip()):
+            values.append(_memory_summary(item))
+    values.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
+    return {"memory": values[: max(1, min(limit, 500))], "count": len(values), "query": q}
+
+
+@router.post("/api/memory")
+async def create_memory(request: Request):
+    owner = _require_access(request)
+    return {"ok": True, "memory": _memory_summary(_new_memory(await _body(request), owner))}
+
+
+@router.get("/api/projects/{project_id}/memory")
+async def list_project_memory(request: Request, project_id: str, q: str = "", limit: int = 100):
+    owner = _require_access(request)
+    _owned_project(project_id, owner)
+    result = await list_memory(request, q=q, project_id=project_id, limit=limit)
+    return result
+
+
+@router.post("/api/projects/{project_id}/memory")
+async def create_project_memory(request: Request, project_id: str):
+    owner = _require_access(request)
+    return {"ok": True, "memory": _memory_summary(_new_memory(await _body(request), owner, project_id))}
+
+
+@router.patch("/api/memory/{memory_id}")
+async def update_memory(request: Request, memory_id: str):
+    owner = _require_access(request)
+    item = _phase3_item("memory", memory_id, owner)
+    payload = await _body(request)
+    for key in ("content", "category", "type", "source", "confidence", "metadata"):
+        if key not in payload:
+            continue
+        if key == "content":
+            if not isinstance(payload[key], str) or not payload[key].strip():
+                return _json_error("content is required")
+            item[key] = payload[key].strip()[:50000]
+        elif key == "type":
+            value = str(payload[key]).lower()
+            if value not in MEMORY_TYPES:
+                return _json_error(f"type must be one of {sorted(MEMORY_TYPES)}")
+            item[key] = value
+        elif key == "metadata":
+            if not isinstance(payload[key], dict):
+                return _json_error("metadata must be an object")
+            item[key] = payload[key]
+        else:
+            item[key] = payload[key]
+    item["updated_at"] = _now()
+    _save_state()
+    return {"ok": True, "memory": _memory_summary(item)}
+
+
+@router.delete("/api/memory/{memory_id}")
+async def delete_memory(request: Request, memory_id: str):
+    owner = _require_access(request)
+    _phase3_item("memory", memory_id, owner)
+    _WEBUI_STATE["memory"] = [
+        item for item in _WEBUI_STATE.get("memory", [])
+        if item.get("id") != memory_id
+    ]
+    _save_state()
+    return {"ok": True, "deleted_id": memory_id}
+
+
+def _goal_tasks(goal_id: str, owner: str) -> List[Dict[str, Any]]:
+    return [
+        item for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("goal_id") == goal_id and item.get("webui_owner") in {None, owner}
+    ]
+
+
+def _goal_summary(goal: Dict[str, Any], owner: str) -> Dict[str, Any]:
+    tasks = _goal_tasks(goal["id"], owner)
+    completed = sum(item.get("status") == "COMPLETED" for item in tasks)
+    result = {key: value for key, value in goal.items() if key != "webui_owner"}
+    result.update({
+        "task_count": len(tasks),
+        "completed_task_count": completed,
+        "progress": round((completed / len(tasks)) * 100) if tasks else 0,
+    })
+    return result
+
+
+@router.get("/api/goals")
+async def list_goals(request: Request, project_id: Optional[str] = None, status: Optional[str] = None):
+    owner = _require_access(request)
+    if project_id:
+        _owned_project(project_id, owner)
+    values = [
+        _goal_summary(item, owner) for item in _WEBUI_STATE.get("goals", [])
+        if item.get("webui_owner") in {None, owner}
+        and (project_id is None or item.get("project_id") == project_id)
+        and (status is None or item.get("status") == status)
+    ]
+    values.sort(key=lambda item: item.get("updated_at", 0), reverse=True)
+    return {"goals": values}
+
+
+def _new_goal(payload: Dict[str, Any], owner: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HTTPException(status_code=400, detail="title is required")
+    if project_id:
+        _owned_project(project_id, owner)
+    status = str(payload.get("status") or "PLANNED").upper()
+    if status not in GOAL_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(GOAL_STATUSES)}")
+    now = _now()
+    goal = {
+        "id": _phase3_id("goal"),
+        "title": title.strip()[:240],
+        "description": str(payload.get("description") or "")[:20000],
+        "status": status,
+        "priority": str(payload.get("priority") or "normal")[:40],
+        "deadline": payload.get("deadline"),
+        "project_id": project_id or payload.get("project_id"),
+        "created_at": now,
+        "updated_at": now,
+        "webui_owner": owner,
+    }
+    _WEBUI_STATE.setdefault("goals", []).append(goal)
+    _save_state()
+    return goal
+
+
+@router.post("/api/goals")
+async def create_goal(request: Request):
+    owner = _require_access(request)
+    return {"ok": True, "goal": _goal_summary(_new_goal(await _body(request), owner), owner)}
+
+
+@router.get("/api/goals/{goal_id}")
+async def get_goal(request: Request, goal_id: str):
+    owner = _require_access(request)
+    goal = _phase3_item("goals", goal_id, owner)
+    result = _goal_summary(goal, owner)
+    result["tasks"] = [dict(item) for item in _goal_tasks(goal_id, owner)]
+    return {"goal": result}
+
+
+@router.patch("/api/goals/{goal_id}")
+async def update_goal(request: Request, goal_id: str):
+    owner = _require_access(request)
+    goal = _phase3_item("goals", goal_id, owner)
+    payload = await _body(request)
+    for key in ("title", "description", "priority", "deadline"):
+        if key in payload:
+            if key == "title" and (not isinstance(payload[key], str) or not payload[key].strip()):
+                return _json_error("title is required")
+            goal[key] = payload[key].strip()[:240] if key == "title" else (payload[key][:20000] if key == "description" and isinstance(payload[key], str) else payload[key])
+    if "status" in payload:
+        status = str(payload["status"]).upper()
+        if status not in GOAL_STATUSES:
+            return _json_error(f"status must be one of {sorted(GOAL_STATUSES)}")
+        goal["status"] = status
+    goal["updated_at"] = _now()
+    _save_state()
+    return {"ok": True, "goal": _goal_summary(goal, owner)}
+
+
+@router.delete("/api/goals/{goal_id}")
+async def delete_goal(request: Request, goal_id: str):
+    owner = _require_access(request)
+    _phase3_item("goals", goal_id, owner)
+    _WEBUI_STATE["goals"] = [item for item in _WEBUI_STATE.get("goals", []) if item.get("id") != goal_id]
+    _WEBUI_STATE["tasks"] = [item for item in _WEBUI_STATE.get("tasks", []) if item.get("goal_id") != goal_id]
+    _save_state()
+    return {"ok": True, "deleted_id": goal_id}
+
+
+@router.get("/api/projects/{project_id}/goals")
+async def list_project_goals(request: Request, project_id: str):
+    return await list_goals(request, project_id=project_id)
+
+
+@router.post("/api/projects/{project_id}/goals")
+async def create_project_goal(request: Request, project_id: str):
+    owner = _require_access(request)
+    return {"ok": True, "goal": _goal_summary(_new_goal(await _body(request), owner, project_id), owner)}
+
+
+def _task_summary(task: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in task.items() if key != "webui_owner"}
+
+
+def _owned_task(task_id: str, owner: str) -> Dict[str, Any]:
+    return _phase3_item("tasks", task_id, owner)
+
+
+def _dependency_status(task: Dict[str, Any], owner: str) -> Tuple[bool, bool]:
+    dependencies = task.get("dependencies") or []
+    records = []
+    for dep_id in dependencies:
+        dep = _owned_task(str(dep_id), owner)
+        records.append(dep)
+    return all(item.get("status") == "COMPLETED" for item in records), any(item.get("status") in {"FAILED", "CANCELLED", "BLOCKED"} for item in records)
+
+
+def _refresh_task_readiness(owner: str) -> None:
+    for _ in range(max(1, len(_WEBUI_STATE.get("tasks", [])))):
+        changed = False
+        for task in _WEBUI_STATE.get("tasks", []):
+            if task.get("webui_owner") not in {None, owner} or task.get("status") in TASK_TERMINAL_STATUSES or task.get("status") in {"RUNNING", "WAITING_APPROVAL"}:
+                continue
+            ready, failed = _dependency_status(task, owner)
+            next_status = "READY" if ready else ("BLOCKED" if failed else "PENDING")
+            if task.get("status") != next_status:
+                task["status"] = next_status
+                task["updated_at"] = _now()
+                changed = True
+        if not changed:
+            break
+
+
+def _would_cycle(task_id: str, dependencies: List[str], owner: str) -> bool:
+    graph = {
+        item["id"]: list(item.get("dependencies") or [])
+        for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("webui_owner") in {None, owner}
+    }
+    graph[task_id] = dependencies
+    visiting = set()
+    visited = set()
+
+    def visit(node: str) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        if any(visit(dep) for dep in graph.get(node, [])):
+            return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    return visit(task_id)
+
+
+def _new_task(payload: Dict[str, Any], owner: str, project_id: Optional[str] = None, goal_id: Optional[str] = None) -> Dict[str, Any]:
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HTTPException(status_code=400, detail="title is required")
+    resolved_project = project_id or payload.get("project_id")
+    resolved_goal = goal_id or payload.get("goal_id")
+    if resolved_project:
+        _owned_project(str(resolved_project), owner)
+    if resolved_goal:
+        goal = _phase3_item("goals", str(resolved_goal), owner)
+        if resolved_project and goal.get("project_id") != resolved_project:
+            raise HTTPException(status_code=400, detail="Goal does not belong to project")
+        resolved_project = goal.get("project_id") or resolved_project
+    dependencies = [str(value) for value in (payload.get("dependencies") or [])]
+    if len(set(dependencies)) != len(dependencies):
+        raise HTTPException(status_code=400, detail="dependencies must be unique")
+    for dep_id in dependencies:
+        dep = _owned_task(dep_id, owner)
+        if resolved_project and dep.get("project_id") != resolved_project:
+            raise HTTPException(status_code=400, detail="Dependencies must belong to the same project")
+    task_id = _phase3_id("task")
+    if _would_cycle(task_id, dependencies, owner):
+        raise HTTPException(status_code=400, detail="Task dependencies cannot contain a cycle")
+    requested = str(payload.get("status") or ("READY" if not dependencies else "PENDING")).upper()
+    if requested not in TASK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(TASK_STATUSES)}")
+    now = _now()
+    task = {
+        "id": task_id,
+        "title": title.strip()[:240],
+        "description": str(payload.get("description") or "")[:20000],
+        "status": requested,
+        "priority": str(payload.get("priority") or "normal")[:40],
+        "goal_id": resolved_goal,
+        "project_id": resolved_project,
+        "dependencies": dependencies,
+        "created_at": now,
+        "updated_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "error": None,
+        "result": None,
+        "summary": None,
+        "session_id": payload.get("session_id"),
+        "webui_owner": owner,
+    }
+    _WEBUI_STATE.setdefault("tasks", []).append(task)
+    _refresh_task_readiness(owner)
+    _save_state()
+    return task
+
+
+@router.get("/api/tasks")
+async def list_tasks(request: Request, project_id: Optional[str] = None, goal_id: Optional[str] = None, status: Optional[str] = None):
+    owner = _require_access(request)
+    if project_id:
+        _owned_project(project_id, owner)
+    if goal_id:
+        _phase3_item("goals", goal_id, owner)
+    _refresh_task_readiness(owner)
+    values = [
+        _task_summary(item) for item in _WEBUI_STATE.get("tasks", [])
+        if item.get("webui_owner") in {None, owner}
+        and (project_id is None or item.get("project_id") == project_id)
+        and (goal_id is None or item.get("goal_id") == goal_id)
+        and (status is None or item.get("status") == status)
+    ]
+    values.sort(key=lambda item: item.get("created_at", 0))
+    return {"tasks": values}
+
+
+@router.post("/api/tasks")
+async def create_task(request: Request):
+    owner = _require_access(request)
+    return {"ok": True, "task": _task_summary(_new_task(await _body(request), owner))}
+
+
+@router.get("/api/tasks/{task_id}")
+async def get_task(request: Request, task_id: str):
+    owner = _require_access(request)
+    _refresh_task_readiness(owner)
+    return {"task": _task_summary(_owned_task(task_id, owner))}
+
+
+@router.patch("/api/tasks/{task_id}")
+async def update_task(request: Request, task_id: str):
+    owner = _require_access(request)
+    task = _owned_task(task_id, owner)
+    payload = await _body(request)
+    for key in ("title", "description", "priority", "error", "result", "summary", "session_id"):
+        if key in payload:
+            if key == "title" and (not isinstance(payload[key], str) or not payload[key].strip()):
+                return _json_error("title is required")
+            task[key] = payload[key].strip()[:240] if key == "title" else payload[key]
+    if "dependencies" in payload:
+        dependencies = [str(value) for value in (payload.get("dependencies") or [])]
+        if task_id in dependencies or len(set(dependencies)) != len(dependencies):
+            return _json_error("Task dependencies must be unique and cannot include the task itself")
+        for dep_id in dependencies:
+            dep = _owned_task(dep_id, owner)
+            if task.get("project_id") and dep.get("project_id") != task.get("project_id"):
+                return _json_error("Dependencies must belong to the same project")
+        if _would_cycle(task_id, dependencies, owner):
+            return _json_error("Task dependencies cannot contain a cycle")
+        task["dependencies"] = dependencies
+    if "status" in payload:
+        status = str(payload["status"]).upper()
+        if status not in TASK_STATUSES:
+            return _json_error(f"status must be one of {sorted(TASK_STATUSES)}")
+        if status in {"READY", "RUNNING"}:
+            ready, _ = _dependency_status(task, owner)
+            if not ready:
+                return JSONResponse({"error": "Task dependencies have not completed"}, status_code=409)
+        task["status"] = status
+        if status == "RUNNING" and not task.get("started_at"):
+            task["started_at"] = _now()
+        if status == "COMPLETED":
+            task["completed_at"] = _now()
+            if not task.get("started_at"):
+                task["started_at"] = task["completed_at"]
+        if status in {"FAILED", "CANCELLED"}:
+            task["completed_at"] = _now()
+    task["updated_at"] = _now()
+    _refresh_task_readiness(owner)
+    _save_state()
+    return {"ok": True, "task": _task_summary(task)}
+
+
+@router.delete("/api/tasks/{task_id}")
+async def delete_task(request: Request, task_id: str):
+    owner = _require_access(request)
+    _owned_task(task_id, owner)
+    _WEBUI_STATE["tasks"] = [item for item in _WEBUI_STATE.get("tasks", []) if item.get("id") != task_id]
+    for task in _WEBUI_STATE.get("tasks", []):
+        if task_id in (task.get("dependencies") or []):
+            task["dependencies"] = [value for value in task["dependencies"] if value != task_id]
+    _refresh_task_readiness(owner)
+    _save_state()
+    return {"ok": True, "deleted_id": task_id}
+
+
+@router.post("/api/tasks/{task_id}/start")
+async def start_task(request: Request, task_id: str):
+    owner = _require_access(request)
+    task = _owned_task(task_id, owner)
+    ready, _ = _dependency_status(task, owner)
+    if not ready:
+        return JSONResponse({"error": "Task dependencies have not completed"}, status_code=409)
+    task["status"] = "RUNNING"
+    task["started_at"] = task.get("started_at") or _now()
+    task["updated_at"] = _now()
+    _save_state()
+    return {"ok": True, "task": _task_summary(task)}
+
+
+@router.get("/api/projects/{project_id}/tasks")
+async def list_project_tasks(request: Request, project_id: str):
+    return await list_tasks(request, project_id=project_id)
+
+
+@router.post("/api/projects/{project_id}/tasks")
+async def create_project_task(request: Request, project_id: str):
+    owner = _require_access(request)
+    return {"ok": True, "task": _task_summary(_new_task(await _body(request), owner, project_id))}
+
+@router.get("/api/goals/{goal_id}/tasks")
+async def list_goal_tasks(request: Request, goal_id: str):
+    return await list_tasks(request, goal_id=goal_id)
+
+@router.post("/api/goals/{goal_id}/tasks")
+async def create_goal_task(request: Request, goal_id: str):
+    owner = _require_access(request)
+    return {"ok": True, "task": _task_summary(_new_task(await _body(request), owner, goal_id=goal_id))}
 
 
 # ---------------------------------------------------------------------------
@@ -1455,7 +2145,21 @@ async def upload_workspace_file(request: Request):
         content = str(payload.get("content") or payload.get("extracted_content") or "")
         file_name = _safe_upload_name(payload.get("file_name") or payload.get("filename") or "document.txt")
         file_type = str(payload.get("file_type") or "text/plain")
+        project_id = payload.get("project_id")
+        if project_id:
+            _owned_project(str(project_id), owner)
         record = _legacy_upload_record(file_name, content, file_type, len(content.encode("utf-8")))
+        _WEBUI_STATE.setdefault("files", []).append({
+            "id": record["id"],
+            "filename": file_name,
+            "file_type": file_type,
+            "size": record["file_size"],
+            "created_at": _now(),
+            "project_id": str(project_id) if project_id else None,
+            "session_id": payload.get("session_id"),
+            "webui_owner": owner,
+        })
+        _save_state()
         return record
     form = await request.form()
     uploaded = form.get("file")
@@ -1465,6 +2169,7 @@ async def upload_workspace_file(request: Request):
     if not session_id:
         session_id = _new_session({}, owner)
     _owned_session(session_id, owner)
+    session = _session(session_id)
     root = _workspace_path(session_id)
     filename = _safe_upload_name(uploaded.filename)
     target = _safe_upload_target(root, filename)
@@ -1490,6 +2195,18 @@ async def upload_workspace_file(request: Request):
     relative = str(target.relative_to(root))
     mime = getattr(uploaded, "content_type", None) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     record = _legacy_upload_record(target.name, "", mime, total)
+    _WEBUI_STATE.setdefault("files", []).append({
+        "id": record["id"],
+        "filename": target.name,
+        "path": relative,
+        "file_type": mime,
+        "size": total,
+        "created_at": _now(),
+        "project_id": session.get("project_id"),
+        "session_id": session_id,
+        "webui_owner": owner,
+    })
+    _save_state()
     return {**record, "filename": target.name, "path": relative, "mime": mime, "size": total, "is_image": mime.startswith("image/")}
 
 

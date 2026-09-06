@@ -24,7 +24,7 @@ The existing OpenAI-compatible `/v1/*` API remains available unchanged. Hermex s
 
 `https://jishnupg-hermes.hf.space`
 
-The additive WebUI adapter exposes authentication, sessions, projects, chat/SSE, uploads, workspace files, models, providers, settings, reasoning, and profiles under `/api/*`. Set `HERMES_WEBUI_PASSWORD` in the Hugging Face Space Variables and secrets to enable the independent WebUI password login. Alternatively, set `HERMES_WEBUI_API_KEY` to accept a pre-shared bearer key without issuing a cookie. The adapter uses an HTTP-only session cookie and never returns Gateway credentials to clients. Do not rely on the development fallback (no configured WebUI credential) for a public deployment.
+The additive WebUI adapter exposes authentication, sessions, projects, persistent memory, goals, dependency-aware tasks, chat/SSE, uploads, workspace files, models, providers, settings, reasoning, and profiles under `/api/*`. Set `HERMES_WEBUI_PASSWORD` in the Hugging Face Space Variables and secrets to enable the independent WebUI password login. Alternatively, set `HERMES_WEBUI_API_KEY` to accept a pre-shared bearer key without issuing a cookie. The adapter uses an HTTP-only session cookie and never returns Gateway credentials to clients. Do not rely on the development fallback (no configured WebUI credential) for a public deployment.
 
 ### Hermes Agent server operations
 
@@ -49,7 +49,8 @@ All WebUI routes except authentication status and login require either the
   `GET /api/session`, `GET /api/session/status`,
   `GET /api/session/usage`, `POST /api/session/new`,
   `POST /api/session/{rename,delete,clear,pin,archive,move,branch,truncate,update,compress,undo,retry,yolo}`
-- Projects: `GET /api/projects`, `POST /api/projects/{create,rename,delete}`
+- Projects: `GET|POST /api/projects`, `GET|PATCH|DELETE /api/projects/:id`, `POST /api/projects/{create,rename,delete}`, plus project sessions/files/memory/goals/tasks
+- Phase 3 data: `GET|POST /api/memory`, `PATCH|DELETE /api/memory/:id`, `GET|POST /api/goals`, `GET|PATCH|DELETE /api/goals/:id`, `GET|POST /api/tasks`, `GET|PATCH|DELETE /api/tasks/:id`, and `POST /api/tasks/:id/start`
 - Chat: `POST /api/chat/start`, `GET /api/chat/stream`,
   `GET|POST /api/chat/cancel`, `GET /api/chat/stream/status`,
   `POST /api/chat/steer`
