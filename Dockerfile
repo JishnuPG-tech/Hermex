@@ -2,7 +2,7 @@ FROM node:24-bookworm-slim AS web-build
 
 WORKDIR /web
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
 COPY artifacts/hermes-web/package.json artifacts/hermes-web/package.json
