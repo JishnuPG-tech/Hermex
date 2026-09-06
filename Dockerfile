@@ -1,3 +1,18 @@
+FROM node:24-bookworm-slim AS web-build
+
+WORKDIR /web
+
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
+COPY artifacts/hermes-web/package.json artifacts/hermes-web/package.json
+
+RUN pnpm install --frozen-lockfile
+
+COPY artifacts/hermes-web artifacts/hermes-web
+
+RUN pnpm --filter @workspace/hermes-web run build
+
 FROM python:3.11-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,6 +58,7 @@ COPY Backend/gateway/anthropic_bridge.py /app/Backend/gateway/anthropic_bridge.p
 COPY Backend/gateway/claude_rest_api.py /app/Backend/gateway/claude_rest_api.py
 COPY hermes_core /app/hermes_core
 COPY ignis /app/ignis
+COPY --from=web-build /web/artifacts/hermes-web/dist /app/web
 COPY health_doctor.py /app/health_doctor.py
 COPY nginx.conf /app/nginx.conf
 COPY entrypoint.sh /app/entrypoint.sh
