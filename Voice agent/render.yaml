@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: hermex-voice-agent
+    runtime: docker
+    dockerfilePath: ./Voice agent/Dockerfile
+    dockerContext: ./Voice agent
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: LIVEKIT_AGENT_NAME
+        value: hermex-voice
+      - key: HERMES_COGNITIVE_URL
+        sync: false
+      - key: HERMES_COGNITIVE_API_KEY
+        sync: false
+      - key: HERMES_COGNITIVE_MODEL
+        value: hermes
+      - key: HERMEX_DEFAULT_VOICE
+        value: rounded
+      - key: HERMEX_DEFAULT_LANGUAGE
+        value: en-GB
+      - key: HERMEX_DEFAULT_PACE
+        value: normal
+      - key: VOICE_API_PORT
+        value: "8788"
+      - key: VOICE_ALLOWED_ORIGINS
+        value: https://hermex-voice-agent--jishnupgtech.replit.app
+      - key: VOICE_TOKEN_TTL_SECONDS
+        value: "600"
+      - key: VOICE_SESSION_TTL_SECONDS
+        value: "3600"
+      - key: VOICE_API_SHARED_SECRET
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
