@@ -3,7 +3,7 @@ import logging
 
 from dotenv import load_dotenv
 
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, TurnHandlingOptions, cli, inference
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, TurnHandlingOptions, cli, inference, room_io
 from livekit.plugins import noise_cancellation, openai
 
 from config import get_settings
@@ -14,8 +14,6 @@ settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger('hermex.voice.agent')
 
-# Original Hermex voice profiles mapped to currently supported LiveKit Inference
-# voices. These are provider voice IDs, not AI model/provider controls exposed to users.
 VOICE_MAP = {
     'rounded': 'Ashley',
     'glassy': 'Olivia',
@@ -57,7 +55,6 @@ cleanly and listen to the new turn. Prefer short natural sentences over long mon
 def _tts_config(voice_profile: str, language: str, pace: str):
     voice = VOICE_MAP.get(voice_profile, VOICE_MAP['rounded'])
     rate = PACE_MAP.get(pace, PACE_MAP['normal'])
-    # Inworld TTS 2 supports speaking_rate from 0.5 to 1.5 through LiveKit Inference.
     return inference.TTS(
         model='inworld/inworld-tts-2',
         voice=voice,
@@ -127,11 +124,11 @@ async def entrypoint(ctx: JobContext):
     await session.start(
         agent=agent,
         room=ctx.room,
-        room_options={
-            'audio_input': {
-                'noise_cancellation': noise_cancellation.BVC(),
-            }
-        },
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=noise_cancellation.BVC(),
+            ),
+        ),
     )
 
     logger.info('Hermex voice session started session_id=%s', session_id)
