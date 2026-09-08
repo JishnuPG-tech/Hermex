@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     livekit_api_secret: str = Field(default='')
     livekit_agent_name: str = 'hermex-voice'
 
-    hermes_cognitive_url: str = 'http://127.0.0.1:8642/v1/chat/completions'
+    # OpenAI-compatible base URL. The LiveKit OpenAI plugin appends /chat/completions.
+    hermes_cognitive_url: str = 'http://127.0.0.1:8642/v1'
     hermes_cognitive_api_key: str = ''
     hermes_cognitive_model: str = 'hermes'
 
