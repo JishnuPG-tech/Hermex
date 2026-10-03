@@ -76,4 +76,9 @@ jobs:
 
           git diff --cached --stat
           git commit -m "Sync Hermex from GitHub ${GITHUB_SHA}"
+
+          # Git LFS files are deliberately excluded from this mirror.
+          # Remove the LFS pre-push hook so old missing objects are not re-uploaded.
+          rm -f .git/hooks/pre-push
+
           git push origin HEAD:main
