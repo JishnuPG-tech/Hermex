@@ -565,12 +565,49 @@ class TelegramBotService:
             logger.info("Telegram bot service disabled or token missing.")
             return
 
-        # The gateway is started before nginx in entrypoint.sh. Therefore the
-        # public HF webhook URL is not reachable during FastAPI startup.
-        # Configure it asynchronously after the edge proxy has come up.
+        # Telegram activation is user-driven. If the webhook was already
+        # activated successfully, Telegram keeps the webhook registered across
+        # Hermes restarts, so do not make an outbound Telegram request at boot.
+        if cfg.get("webhook_set"):
+            self.running = True
+            logger.info(
+                "Telegram webhook already activated. "
+                "Waiting for Telegram updates without startup API calls."
+            )
+            return
+
+        # No activation yet. The user can open /api/telegram/activate to
+        # explicitly activate or re-activate the webhook.
         self.running = True
-        self.task = asyncio.create_task(self._configure_webhook(cfg["token"]))
-        logger.info("Telegram webhook configurator started.")
+        logger.info(
+            "Telegram webhook is not activated. "
+            "Open /api/telegram/activate to activate it."
+        )
+
+    async def activate_webhook(self) -> Dict[str, Any]:
+        cfg = load_channels_config()
+        telegram = cfg.setdefault("telegram", {})
+        token = telegram.get("token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return {"ok": False, "status": "missing_token"}
+
+        telegram["enabled"] = True
+        telegram["webhook_set"] = False
+        save_channels_config(cfg)
+
+        self.running = True
+        if self.task and not self.task.done():
+            self.task.cancel()
+        self.task = asyncio.create_task(self._configure_webhook(token))
+        logger.info("Telegram webhook activation requested by user.")
+        return {
+            "ok": True,
+            "status": "activation_started",
+            "webhook_url": os.getenv(
+                "TELEGRAM_WEBHOOK_URL",
+                "https://jishnupg-hermes.hf.space/api/webhooks/telegram"
+            )
+        }
 
     async def _configure_webhook(self, token: str):
         api_base = f"https://api.telegram.org/bot{token}"
@@ -579,12 +616,12 @@ class TelegramBotService:
             "https://jishnupg-hermes.hf.space/api/webhooks/telegram"
         )
 
-        # Give nginx/HF ingress time to become reachable, then retry with
-        # backoff. Never fall back to polling because polling and webhook mode
-        # must not compete for the same bot updates.
-        await asyncio.sleep(15)
+        # This task is normally launched by the user activation endpoint.
+        # Retry for a long period so a temporary network problem does not
+        # require another code deployment or restart.
+        await asyncio.sleep(2)
 
-        for attempt in range(1, 11):
+        for attempt in range(1, 121):
             if not self.running:
                 return
             try:
@@ -599,6 +636,16 @@ class TelegramBotService:
                     )
                     data = r.json()
                     if r.status_code == 200 and data.get("ok"):
+                        cfg = load_channels_config()
+                        telegram = cfg.setdefault("telegram", {})
+                        telegram["enabled"] = True
+                        telegram["webhook_set"] = True
+                        telegram["webhook_url"] = webhook_url
+                        telegram["webhook_activated_at"] = time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        )
+                        save_channels_config(cfg)
+
                         logger.info(
                             f"Telegram Webhook configured successfully: {webhook_url}"
                         )
@@ -623,11 +670,11 @@ class TelegramBotService:
                     attempt, repr(e)
                 )
 
-            await asyncio.sleep(min(30, 3 * attempt))
+            await asyncio.sleep(min(60, 3 * attempt))
 
         logger.error(
-            "Telegram webhook could not be configured after 10 attempts. "
-            "Polling is intentionally NOT started. Check HF ingress and TELEGRAM_BOT_TOKEN."
+            "Telegram webhook activation exhausted its retry window. "
+            "Open /api/telegram/activate again to start a fresh activation cycle."
         )
     async def stop(self):
         self.running = False
