@@ -24,7 +24,7 @@ def _telegram_http_client(**kwargs) -> httpx.AsyncClient:
     """
     kwargs.setdefault("follow_redirects", True)
     kwargs.setdefault("transport", httpx.AsyncHTTPTransport(local_address="0.0.0.0"))
-    return _telegram_http_client(**kwargs)
+    return httpx.AsyncClient(**kwargs)
 
 CONFIG_PATH = "/data/hermes/channels.json"
 LOCAL_CONFIG_PATH = os.path.expanduser("~/.hermes/channels.json")
