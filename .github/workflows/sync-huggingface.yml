@@ -31,17 +31,16 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: Jishnupg/Hermes
-          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
           set -euxo pipefail
 
           test -n "${HF_TOKEN:-}"
 
           rm -rf /tmp/hf-space
-          GIT_LFS_SKIP_SMUDGE=1 git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
+          GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false clone --no-checkout "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
 
           cd /tmp/hf-space
-          git lfs install --local || true
+          GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false checkout --force
           git status --short
 
           cd "${GITHUB_WORKSPACE}"
