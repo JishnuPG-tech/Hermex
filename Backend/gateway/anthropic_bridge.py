@@ -356,10 +356,17 @@ class ContentBlockEmitter:
 
 
 async def anthropic_sse(request_model: str, payload: dict) -> AsyncGenerator[str, None]:
-    """Stream standard Anthropic SSE with direct text and tool use blocks."""
+    """Stream Anthropic SSE and guarantee a non-empty assistant content block.
+
+    Some upstream models can finish after emitting only reasoning metadata, or
+    return a response with neither text nor tool calls. The Claude client rejects
+    that as an empty turn. Reasoning-only deltas are therefore ignored, and an
+    explicit fallback text block is emitted if the upstream completes empty.
+    """
     emitter = ContentBlockEmitter(request_model)
     message_started = False
     text_started = False
+    content_emitted = False
 
     try:
         async for data in stream_upstream(payload, requested_model=request_model):
@@ -376,12 +383,14 @@ async def anthropic_sse(request_model: str, payload: dict) -> AsyncGenerator[str
             piece = delta.get("content")
             tool_calls = delta.get("tool_calls")
 
-            # 1. Initialize message on first arrival
+            # Reasoning-only deltas do not constitute assistant content.
+            if not piece and not tool_calls:
+                continue
+
             if not message_started:
                 message_started = True
                 yield await emitter.emit_message_start()
 
-            # 2. Tool calls
             if tool_calls:
                 if text_started:
                     yield emitter.emit_content_block_stop(0)
@@ -389,34 +398,80 @@ async def anthropic_sse(request_model: str, payload: dict) -> AsyncGenerator[str
 
                 for tc in tool_calls:
                     func = tc.get("function", {})
+                    raw_arguments = func.get("arguments", "{}")
+                    try:
+                        parsed_input = (
+                            json.loads(raw_arguments)
+                            if isinstance(raw_arguments, str) and raw_arguments.strip()
+                            else (raw_arguments if isinstance(raw_arguments, dict) else {})
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        parsed_input = {}
+
                     tool_idx = emitter._next_index()
                     yield emitter.emit_content_block_start("tool_use", {
                         "type": "tool_use",
                         "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
                         "name": func.get("name", "unknown"),
-                        "input": json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else {}
+                        "input": parsed_input
                     }, index=tool_idx)
-                    if func.get("arguments"):
+                    if isinstance(raw_arguments, str) and raw_arguments:
                         yield emitter.emit_content_block_delta(tool_idx, "input_json_delta", {
-                            "partial_json": func["arguments"]
+                            "partial_json": raw_arguments
                         })
                     yield emitter.emit_content_block_stop(tool_idx)
+                    content_emitted = True
                 continue
 
-            # 3. Direct clean text streaming
             if piece:
                 if not text_started:
                     text_started = True
                     yield emitter.emit_content_block_start("text", {"type": "text", "text": ""}, index=0)
 
                 yield emitter.emit_content_block_delta(0, "text_delta", {"text": piece})
+                content_emitted = True
+
+    except Exception:
+        # Do not leave the client with a half-open empty message.
+        if not message_started:
+            message_started = True
+            yield await emitter.emit_message_start()
+        if not content_emitted:
+            fallback = "I couldn't produce a response from the selected model. Please try again."
+            yield emitter.emit_content_block_start(
+                "text", {"type": "text", "text": ""}, index=0
+            )
+            yield emitter.emit_content_block_delta(
+                0, "text_delta", {"text": fallback}
+            )
+            yield emitter.emit_content_block_stop(0)
+            content_emitted = True
 
     finally:
-        if message_started:
-            if text_started:
-                yield emitter.emit_content_block_stop(0)
-            yield emitter.emit_message_delta("end_turn")
-            yield emitter.emit_message_stop()
+        # Critical invariant: every completed Anthropic message has at least
+        # one text or tool-use block.
+        if not message_started:
+            message_started = True
+            yield await emitter.emit_message_start()
+
+        if not content_emitted:
+            fallback = "I didn't receive usable content from the model. Please try again."
+            yield emitter.emit_content_block_start(
+                "text", {"type": "text", "text": ""}, index=0
+            )
+            yield emitter.emit_content_block_delta(
+                0, "text_delta", {"text": fallback}
+            )
+            yield emitter.emit_content_block_stop(0)
+            content_emitted = True
+
+        if text_started:
+            yield emitter.emit_content_block_stop(0)
+            text_started = False
+
+        yield emitter.emit_message_delta("end_turn")
+        yield emitter.emit_message_stop()
+
 
 
 def build_openai_payload(body: dict) -> tuple:
