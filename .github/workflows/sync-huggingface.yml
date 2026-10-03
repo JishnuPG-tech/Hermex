@@ -21,7 +21,7 @@ jobs:
 
       - name: Build Git LFS exclusion list
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           git lfs install --local
           git lfs ls-files -n > /tmp/lfs-excludes.txt
           echo "LFS paths kept on Hugging Face:"
@@ -31,29 +31,34 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: Jishnupg/Hermes
+          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          if [ -z "${HF_TOKEN:-}" ]; then
-            echo "HF_TOKEN repository secret is missing."
-            exit 1
-          fi
+          test -n "${HF_TOKEN:-}"
 
           rm -rf /tmp/hf-space
-          git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
+          GIT_LFS_SKIP_SMUDGE=1 git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
 
-          rsync -a --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             ./ /tmp/hf-space/
+          cd /tmp/hf-space
+          git lfs install --local || true
+          git status --short
+
+          cd "${GITHUB_WORKSPACE}"
+          rsync -av --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             ./ /tmp/hf-space/
 
           cd /tmp/hf-space
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add -A
+          git status --short
 
           if git diff --cached --quiet; then
             echo "Hugging Face Space is already synchronized."
             exit 0
           fi
 
+          git diff --cached --stat
           git commit -m "Sync Hermex from GitHub ${GITHUB_SHA}"
           git push origin HEAD:main
