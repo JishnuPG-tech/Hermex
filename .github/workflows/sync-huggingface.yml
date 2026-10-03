@@ -1,0 +1,48 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Hermex
+        uses: actions/checkout@v4
+
+      - name: Sync to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: Jishnupg/Hermes
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "HF_TOKEN repository secret is missing."
+            exit 1
+          fi
+
+          rm -rf /tmp/hf-space
+          git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
+
+          rsync -a --delete             --exclude '.git/'             --exclude '.github/'             ./ /tmp/hf-space/
+
+          cd /tmp/hf-space
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Hugging Face Space is already synchronized."
+            exit 0
+          fi
+
+          git commit -m "Sync Hermex from GitHub ${GITHUB_SHA}"
+          git push origin HEAD:main
