@@ -1397,28 +1397,23 @@ async def speech_to_text(request: Request, org_id: Optional[str] = None):
 @router.post("/webhooks/telegram")
 @router.post("/hermes/api/webhooks/telegram")
 async def telegram_webhook(request: Request):
+    """
+    Single Telegram ingress.
+
+    Telegram updates are processed by gateway.channels_manager only.
+    The old implementation also invoked hermes_core.telegram_bot and
+    returned a second sendMessage response, which caused duplicate work
+    and competed with the standalone polling daemon.
+    """
     try:
         data = await request.json()
-        msg = data.get("message") or data.get("edited_message") or {}
-        chat_id = msg.get("chat", {}).get("id")
-        user_id = str(msg.get("from", {}).get("id", ""))
-        text = msg.get("text", "")
-
-        from hermes_core.telegram_bot import process_telegram_update, generate_hermes_telegram_reply
-        
-        # In Telegram webhook protocol, returning {"method": "sendMessage", "chat_id": ..., "text": ...} in the HTTP 200 response body delivers the message instantly without making outbound HTTP calls!
-        if chat_id and text:
-            # Also dispatch async processor
-            asyncio.create_task(process_telegram_update(data))
-            reply_text = await generate_hermes_telegram_reply(text, user_id, chat_id)
-            return {
-                "method": "sendMessage",
-                "chat_id": chat_id,
-                "text": reply_text[:4000]
-            }
+        from gateway import channels_manager
+        asyncio.create_task(channels_manager.process_telegram_update(data))
     except Exception as e:
-        logger.warning(f"Webhook update error: {e}")
-    return {"ok": True, "status": "received"}
+        logger.exception(f"Telegram webhook update error: {e}")
+    # Always acknowledge the webhook quickly. The worker sends the actual
+    # response after processing, so Telegram never waits for model inference.
+    return {"ok": True, "status": "accepted"}
 
 @router.get("/gradio_api/info")
 @router.get("/hermes/gradio_api/info")
