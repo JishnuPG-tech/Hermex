@@ -22,65 +22,48 @@ jobs:
           lfs: false
           fetch-depth: 1
 
-      - name: Build Git LFS exclusion list
-        run: |
-          set -euxo pipefail
-          git lfs install --local
-          git lfs ls-files -n > /tmp/lfs-excludes.txt
-          echo "LFS paths kept on Hugging Face:"
-          cat /tmp/lfs-excludes.txt || true
-
-      - name: Verify HF token
+      - name: Upload non-LFS files through Hugging Face API
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           test -n "${HF_TOKEN:-}"
 
-      - name: Clone Hugging Face Space without LFS checkout
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          set -euxo pipefail
-          rm -rf /tmp/hf-space
-          GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false clone --no-checkout "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
-          git -C /tmp/hf-space rev-parse HEAD
+          python -m pip install --disable-pip-version-check -q huggingface_hub
 
-      - name: Checkout Hugging Face working tree without LFS download
-        run: |
-          set -euxo pipefail
-          cd /tmp/hf-space
-          GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false checkout --force
-          git status --short
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
 
-      - name: Copy non-LFS GitHub files
-        run: |
-          set -euxo pipefail
-          rsync -av --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             "${GITHUB_WORKSPACE}/" /tmp/hf-space/
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          lfs_file = Path("/tmp/lfs-excludes.txt")
 
-      - name: Commit and push to Hugging Face
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          GIT_LFS_SKIP_PUSH: "1"
-        run: |
-          set -euxo pipefail
-          cd /tmp/hf-space
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config lfs.allowincompletepush true
+          os.system("git lfs install --local")
+          lfs_paths = []
+          for line in os.popen("git lfs ls-files -n"):
+              p = line.strip()
+              if p:
+                  lfs_paths.append(p)
 
-          git add -A
-          git status --short
+          print(f"Found {len(lfs_paths)} Git LFS paths")
+          for p in lfs_paths:
+              print(f"Keeping existing HF file: {p}")
 
-          if git diff --cached --quiet; then
-            echo "Hugging Face Space is already synchronized."
-            exit 0
-          fi
+          api = HfApi(token=os.environ["HF_TOKEN"])
 
-          git diff --cached --stat
-          git commit -m "Sync Hermex from GitHub ${GITHUB_SHA}"
+          ignore_patterns = [
+              ".git/**",
+              ".github/**",
+              *lfs_paths,
+          ]
 
-          # This mirror intentionally updates only non-LFS files.
-          rm -f .git/hooks/pre-push
-
-          GIT_LFS_SKIP_PUSH=1 git push --no-verify origin HEAD:main
+          api.upload_folder(
+              repo_id=os.environ["HF_SPACE"],
+              repo_type="space",
+              folder_path=str(root),
+              ignore_patterns=ignore_patterns,
+              commit_message=f"Sync Hermex from GitHub {os.environ['GITHUB_SHA']}",
+          )
+          print("Hugging Face API sync completed")
+          PY
