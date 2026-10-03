@@ -37,11 +37,13 @@ echo "[INIT] Starting Hermes Agent Core on port 8642..."
 python3 /app/hermes_core/agent.py > /dev/stdout 2>&1 &
 HERMES_PID=$!
 
-# Step 7: Start Telegram Bot Handler (Background if token provided)
-if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -f "/app/hermes_core/telegram_bot.py" ]; then
-    echo "[INIT] Starting Hermes Telegram Bot listener..."
-    python3 /app/hermes_core/telegram_bot.py > /dev/stdout 2>&1 &
-    TG_PID=$!
+# Step 7: Telegram is managed exclusively by the FastAPI gateway webhook.
+# Do NOT start hermes_core/telegram_bot.py here. A second polling listener
+# would compete with the gateway webhook for the same bot updates.
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+    echo "[INIT] Telegram Bot: managed by FastAPI gateway webhook"
+else
+    echo "[INIT] Telegram Bot: disabled (TELEGRAM_BOT_TOKEN not set)"
 fi
 
 # Step 8: Start FastAPI Gateway (:8000)
