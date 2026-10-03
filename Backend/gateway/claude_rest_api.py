@@ -3621,6 +3621,8 @@ async def activate_telegram_webhook():
 @router.get("/hermes/api/telegram/status")
 async def telegram_activation_status():
     cfg = cm.load_channels_config().get("telegram", {})
+    service = cm.telegram_service
+    task = service.task
     return {
         "enabled": bool(cfg.get("enabled")),
         "webhook_set": bool(cfg.get("webhook_set")),
@@ -3630,4 +3632,11 @@ async def telegram_activation_status():
         ),
         "activated_at": cfg.get("webhook_activated_at"),
         "activation_mode": "user_driven",
+        "activation_task": (
+            "running" if task and not task.done()
+            else "completed_or_stopped"
+        ),
+        "activation_started_at": service.activation_started_at,
+        "activation_last_attempt": service.activation_last_attempt,
+        "activation_last_error": service.activation_last_error,
     }
