@@ -260,8 +260,10 @@ app.include_router(telemetry_router)
 app.include_router(anthropic_router)
 app.include_router(v1_sessions_router)
 app.include_router(webui_router)
-app.include_router(dashboard_api_router)
+# Telegram/webhook compatibility endpoints must be registered before the
+# dashboard's broad /{path:path} unsupported route.
 app.include_router(claude_rest_router)
+app.include_router(dashboard_api_router)
 app.include_router(omniroute_router)
 app.include_router(ignis_router)
 app.include_router(hermes_proxy_router)
