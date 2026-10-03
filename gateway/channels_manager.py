@@ -17,6 +17,15 @@ import httpx
 logger = logging.getLogger("hermes.channels")
 logging.basicConfig(level=logging.INFO)
 
+def _telegram_http_client(**kwargs) -> httpx.AsyncClient:
+    """
+    Telegram traffic from hosted containers can prefer an unusable IPv6 route.
+    Bind the client locally to IPv4 so DNS resolution/connect uses IPv4.
+    """
+    kwargs.setdefault("follow_redirects", True)
+    kwargs.setdefault("transport", httpx.AsyncHTTPTransport(local_address="0.0.0.0"))
+    return _telegram_http_client(**kwargs)
+
 CONFIG_PATH = "/data/hermes/channels.json"
 LOCAL_CONFIG_PATH = os.path.expanduser("~/.hermes/channels.json")
 
@@ -272,7 +281,7 @@ async def _send_extra_chunks(token: Optional[str], chat_id: int, chunks: List[st
         return
     api_base = f"https://api.telegram.org/bot{token}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _telegram_http_client(timeout=15.0) as client:
             for chunk in chunks:
                 try:
                     await client.post(
@@ -394,7 +403,7 @@ async def process_telegram_update(update: Dict[str, Any], token: Optional[str] =
     text = msg.get("text") or msg.get("caption") or ""
 
     if "*" not in allowed_list and username not in allowed_list and user_id not in allowed_list:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _telegram_http_client(timeout=10.0) as client:
             await client.post(
                 f"{api_base}/sendMessage",
                 json={"chat_id": chat_id, "text": "⛔ Access denied. Contact the administrator to whitelist your user ID."}
@@ -407,7 +416,7 @@ async def process_telegram_update(update: Dict[str, Any], token: Optional[str] =
         filename = document.get("file_name") or f"telegram_{file_id or uuid.uuid4().hex}.pdf"
         mime_type = (document.get("mime_type") or "").lower()
         if not (filename.lower().endswith(".pdf") or mime_type == "application/pdf"):
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with _telegram_http_client(timeout=15.0) as client:
                 await client.post(
                     f"{api_base}/sendMessage",
                     json={"chat_id": chat_id, "text": "⚠️ Please send a PDF document."}
@@ -420,7 +429,7 @@ async def process_telegram_update(update: Dict[str, Any], token: Optional[str] =
         target = os.path.join(incoming_dir, f"{uuid.uuid4().hex[:12]}_{safe_name}")
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True) as client:
+            async with _telegram_http_client(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True) as client:
                 meta = await client.get(f"{api_base}/getFile", params={"file_id": file_id})
                 meta.raise_for_status()
                 file_path = meta.json().get("result", {}).get("file_path")
@@ -450,7 +459,7 @@ async def process_telegram_update(update: Dict[str, Any], token: Optional[str] =
                 "Hermes will inspect the complete PDF, extract questions, validate answers, "
                 "classify them, and preserve source pages."
             )
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with _telegram_http_client(timeout=15.0) as client:
                 await client.post(
                     f"{api_base}/sendMessage",
                     json={"chat_id": chat_id, "text": ack, "parse_mode": "HTML"}
@@ -475,14 +484,14 @@ Do not stop after finding some questions. Process the entire PDF.
 """
             reply = await generate_agent_response(pdf_prompt, session_id=f"tg_pdf_{chat_id}_{job_id}")
             for chunk in format_for_telegram(reply):
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with _telegram_http_client(timeout=15.0) as client:
                     await client.post(
                         f"{api_base}/sendMessage",
                         json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
                     )
         except Exception as e:
             logger.exception(f"Telegram PDF ingestion failed for {filename}: {e}")
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with _telegram_http_client(timeout=15.0) as client:
                 await client.post(
                     f"{api_base}/sendMessage",
                     json={"chat_id": chat_id, "text": f"❌ PDF processing failed: {str(e)[:1000]}"}
@@ -493,7 +502,7 @@ Do not stop after finding some questions. Process the entire PDF.
         return True
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _telegram_http_client(timeout=15.0) as client:
             if text.startswith("/start"):
                 welcome_msg = (
                     "👋 <b>Welcome to Hermes Agentic AI!</b>\n\n"
@@ -579,7 +588,7 @@ class TelegramBotService:
             if not self.running:
                 return
             try:
-                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                async with _telegram_http_client(timeout=20.0, follow_redirects=True) as client:
                     r = await client.post(
                         f"{api_base}/setWebhook",
                         json={
@@ -630,7 +639,7 @@ class TelegramBotService:
     async def _poll_loop(self, token: str):
         api_base = f"https://api.telegram.org/bot{token}"
 
-        async with httpx.AsyncClient(timeout=35.0) as client:
+        async with _telegram_http_client(timeout=35.0) as client:
             while self.running:
                 try:
                     resp = await client.get(
