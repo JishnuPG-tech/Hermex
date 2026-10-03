@@ -556,24 +556,70 @@ class TelegramBotService:
             logger.info("Telegram bot service disabled or token missing.")
             return
 
-        # Auto-configure webhook on startup for maximum reliability
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                webhook_url = "https://jishnupg-hermes.hf.space/api/webhooks/telegram"
-                r = await client.post(
-                    f"https://api.telegram.org/bot{cfg['token']}/setWebhook",
-                    json={"url": webhook_url, "drop_pending_updates": False}
-                )
-                if r.status_code == 200 and r.json().get("ok"):
-                    logger.info(f"Telegram Webhook set to {webhook_url} (0-latency push mode active)")
-                    return
-        except Exception as e:
-            logger.warning(f"Telegram setWebhook failed, using background poller: {e}")
-
+        # The gateway is started before nginx in entrypoint.sh. Therefore the
+        # public HF webhook URL is not reachable during FastAPI startup.
+        # Configure it asynchronously after the edge proxy has come up.
         self.running = True
-        self.task = asyncio.create_task(self._poll_loop(cfg["token"]))
-        logger.info("Telegram Bot polling service started in background.")
+        self.task = asyncio.create_task(self._configure_webhook(cfg["token"]))
+        logger.info("Telegram webhook configurator started.")
 
+    async def _configure_webhook(self, token: str):
+        api_base = f"https://api.telegram.org/bot{token}"
+        webhook_url = os.getenv(
+            "TELEGRAM_WEBHOOK_URL",
+            "https://jishnupg-hermes.hf.space/api/webhooks/telegram"
+        )
+
+        # Give nginx/HF ingress time to become reachable, then retry with
+        # backoff. Never fall back to polling because polling and webhook mode
+        # must not compete for the same bot updates.
+        await asyncio.sleep(15)
+
+        for attempt in range(1, 11):
+            if not self.running:
+                return
+            try:
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                    r = await client.post(
+                        f"{api_base}/setWebhook",
+                        json={
+                            "url": webhook_url,
+                            "drop_pending_updates": False,
+                            "allowed_updates": ["message", "edited_message", "callback_query"]
+                        }
+                    )
+                    data = r.json()
+                    if r.status_code == 200 and data.get("ok"):
+                        logger.info(
+                            f"Telegram Webhook configured successfully: {webhook_url}"
+                        )
+                        info = await client.get(f"{api_base}/getWebhookInfo")
+                        if info.status_code == 200:
+                            info_data = info.json().get("result", {})
+                            logger.info(
+                                "Telegram WebhookInfo: url=%s pending=%s last_error=%s",
+                                info_data.get("url"),
+                                info_data.get("pending_update_count"),
+                                info_data.get("last_error_message")
+                            )
+                        return
+
+                    logger.error(
+                        "Telegram setWebhook failed (attempt %s/10): HTTP %s: %s",
+                        attempt, r.status_code, data
+                    )
+            except Exception as e:
+                logger.error(
+                    "Telegram webhook connection failed (attempt %s/10): %s",
+                    attempt, repr(e)
+                )
+
+            await asyncio.sleep(min(30, 3 * attempt))
+
+        logger.error(
+            "Telegram webhook could not be configured after 10 attempts. "
+            "Polling is intentionally NOT started. Check HF ingress and TELEGRAM_BOT_TOKEN."
+        )
     async def stop(self):
         self.running = False
         if self.task:
