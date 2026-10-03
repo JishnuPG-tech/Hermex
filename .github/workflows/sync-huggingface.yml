@@ -12,6 +12,9 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      HF_SPACE: Jishnupg/Hermes
+
     steps:
       - name: Checkout Hermex without downloading Git LFS blobs
         uses: actions/checkout@v4
@@ -27,29 +30,42 @@ jobs:
           echo "LFS paths kept on Hugging Face:"
           cat /tmp/lfs-excludes.txt || true
 
-      - name: Sync to Hugging Face Space
+      - name: Verify HF token
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE: Jishnupg/Hermes
         run: |
           set -euxo pipefail
-
           test -n "${HF_TOKEN:-}"
 
+      - name: Clone Hugging Face Space without LFS checkout
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euxo pipefail
           rm -rf /tmp/hf-space
           GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false clone --no-checkout "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
+          git -C /tmp/hf-space rev-parse HEAD
 
+      - name: Checkout Hugging Face working tree without LFS download
+        run: |
+          set -euxo pipefail
           cd /tmp/hf-space
           GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= -c filter.lfs.required=false checkout --force
           git status --short
 
-          cd "${GITHUB_WORKSPACE}"
-          rsync -av --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             ./ /tmp/hf-space/
+      - name: Copy non-LFS GitHub files
+        run: |
+          set -euxo pipefail
+          rsync -av --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             "${GITHUB_WORKSPACE}/" /tmp/hf-space/
 
+      - name: Commit and push to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euxo pipefail
           cd /tmp/hf-space
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add -A
           git status --short
 
