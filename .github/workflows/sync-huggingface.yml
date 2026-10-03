@@ -13,18 +13,19 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Hermex with Git LFS
+      - name: Checkout Hermex without downloading Git LFS blobs
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 1
 
-      - name: Verify Git LFS objects
+      - name: Build Git LFS exclusion list
         run: |
           set -euo pipefail
           git lfs install --local
-          git lfs pull
-          git lfs fsck
+          git lfs ls-files -n > /tmp/lfs-excludes.txt
+          echo "LFS paths kept on Hugging Face:"
+          cat /tmp/lfs-excludes.txt || true
 
       - name: Sync to Hugging Face Space
         env:
@@ -41,7 +42,7 @@ jobs:
           rm -rf /tmp/hf-space
           git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" /tmp/hf-space
 
-          rsync -a --delete             --exclude '.git/'             --exclude '.github/'             ./ /tmp/hf-space/
+          rsync -a --delete             --exclude '.git/'             --exclude '.github/'             --exclude-from=/tmp/lfs-excludes.txt             ./ /tmp/hf-space/
 
           cd /tmp/hf-space
           git config user.name "github-actions[bot]"
