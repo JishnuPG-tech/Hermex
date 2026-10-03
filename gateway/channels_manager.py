@@ -8,6 +8,7 @@ import logging
 import smtplib
 import imaplib
 import email
+import hashlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, List, Optional
@@ -398,6 +399,94 @@ async def process_telegram_update(update: Dict[str, Any], token: Optional[str] =
                 f"{api_base}/sendMessage",
                 json={"chat_id": chat_id, "text": "⛔ Access denied. Contact the administrator to whitelist your user ID."}
             )
+        return True
+
+    document = msg.get("document")
+    if document:
+        file_id = document.get("file_id")
+        filename = document.get("file_name") or f"telegram_{file_id or uuid.uuid4().hex}.pdf"
+        mime_type = (document.get("mime_type") or "").lower()
+        if not (filename.lower().endswith(".pdf") or mime_type == "application/pdf"):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(
+                    f"{api_base}/sendMessage",
+                    json={"chat_id": chat_id, "text": "⚠️ Please send a PDF document."}
+                )
+            return True
+
+        incoming_dir = "/data/incoming"
+        os.makedirs(incoming_dir, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._") or f"telegram_{uuid.uuid4().hex}.pdf"
+        target = os.path.join(incoming_dir, f"{uuid.uuid4().hex[:12]}_{safe_name}")
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True) as client:
+                meta = await client.get(f"{api_base}/getFile", params={"file_id": file_id})
+                meta.raise_for_status()
+                file_path = meta.json().get("result", {}).get("file_path")
+                if not file_path:
+                    raise RuntimeError("Telegram getFile returned no file_path")
+                download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+                async with client.stream("GET", download_url) as response:
+                    response.raise_for_status()
+                    with open(target, "wb") as out:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            out.write(chunk)
+
+            sha256 = hashlib.sha256()
+            size = 0
+            with open(target, "rb") as inp:
+                for chunk in iter(lambda: inp.read(1024 * 1024), b""):
+                    sha256.update(chunk)
+                    size += len(chunk)
+
+            job_id = f"HERMES-PDF-{sha256.hexdigest()[:16]}"
+            ack = (
+                "📥 <b>PDF received</b>\n\n"
+                f"File: <code>{safe_name}</code>\n"
+                f"Size: {size / 1048576:.2f} MB\n"
+                f"Job: <code>{job_id}</code>\n\n"
+                "Status: <b>QUEUED</b>\n"
+                "Hermes will inspect the complete PDF, extract questions, validate answers, "
+                "classify them, and preserve source pages."
+            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(
+                    f"{api_base}/sendMessage",
+                    json={"chat_id": chat_id, "text": ack, "parse_mode": "HTML"}
+                )
+
+            pdf_prompt = f"""
+A bank-exam PDF has just been received through Telegram.
+
+Job ID: {job_id}
+File path: {target}
+Original filename: {filename}
+SHA-256: {sha256.hexdigest()}
+
+Process this PDF completely using the Hermes PDF extraction workflow. Inspect every page,
+extract every question, preserve original numbering/options/set context/visual information,
+use OCR where needed, find and validate answer keys, classify subject/topic/subtopic,
+detect duplicates without deleting provenance, save structured JSON and metadata to
+persistent storage, and report pages/questions requiring review.
+
+NEVER GUESS. If an answer cannot be reliably established, use null and REVIEW_REQUIRED.
+Do not stop after finding some questions. Process the entire PDF.
+"""
+            reply = await generate_agent_response(pdf_prompt, session_id=f"tg_pdf_{chat_id}_{job_id}")
+            for chunk in format_for_telegram(reply):
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    await client.post(
+                        f"{api_base}/sendMessage",
+                        json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+                    )
+        except Exception as e:
+            logger.exception(f"Telegram PDF ingestion failed for {filename}: {e}")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(
+                    f"{api_base}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"❌ PDF processing failed: {str(e)[:1000]}"}
+                )
         return True
 
     if not text:
