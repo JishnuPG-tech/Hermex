@@ -3569,3 +3569,65 @@ async def universal_file_upload(request: Request, org_id: Optional[str] = None, 
     
     _UPLOADED_FILES[file_id] = record
     return record
+
+# ==============================================================================
+# User-driven Telegram webhook activation
+# ==============================================================================
+@router.get("/api/telegram/activate", response_class=HTMLResponse)
+@router.get("/telegram/activate", response_class=HTMLResponse)
+@router.get("/hermes/api/telegram/activate", response_class=HTMLResponse)
+async def activate_telegram_webhook():
+    """Explicitly activate or re-activate the Telegram webhook.
+
+    The activation is triggered by the user's browser request instead of
+    application startup. The actual setWebhook call continues in a background
+    task, so the page returns immediately even when Telegram is temporarily
+    unreachable from the hosted runtime.
+    """
+    try:
+        result = await cm.telegram_service.activate_webhook()
+        if not result.get("ok"):
+            return HTMLResponse(
+                "<h2>Telegram activation failed</h2>"
+                "<p>TELEGRAM_BOT_TOKEN is missing.</p>",
+                status_code=503,
+            )
+
+        webhook_url = result.get("webhook_url", "")
+        return HTMLResponse(
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Hermes Telegram Activation</title></head>"
+            "<body style='font-family:system-ui;max-width:680px;margin:50px auto;padding:20px'>"
+            "<h2>Telegram activation started</h2>"
+            "<p>Hermes is now configuring the Telegram webhook in the background.</p>"
+            f"<p><b>Webhook:</b> <code>{webhook_url}</code></p>"
+            "<p>You only need to open this activation link when you want to re-activate it. "
+            "After successful activation, the webhook state is persisted and Hermes will not "
+            "try to configure Telegram on every restart.</p>"
+            "<p><a href='/api/telegram/status'>Check activation status</a></p>"
+            "</body></html>",
+            status_code=202,
+        )
+    except Exception as e:
+        logger.exception("Telegram user-driven activation failed")
+        return HTMLResponse(
+            f"<h2>Telegram activation error</h2><pre>{str(e)[:2000]}</pre>",
+            status_code=500,
+        )
+
+@router.get("/api/telegram/status")
+@router.get("/telegram/status")
+@router.get("/hermes/api/telegram/status")
+async def telegram_activation_status():
+    cfg = cm.load_channels_config().get("telegram", {})
+    return {
+        "enabled": bool(cfg.get("enabled")),
+        "webhook_set": bool(cfg.get("webhook_set")),
+        "webhook_url": cfg.get("webhook_url") or os.getenv(
+            "TELEGRAM_WEBHOOK_URL",
+            "https://jishnupg-hermes.hf.space/api/webhooks/telegram",
+        ),
+        "activated_at": cfg.get("webhook_activated_at"),
+        "activation_mode": "user_driven",
+    }
