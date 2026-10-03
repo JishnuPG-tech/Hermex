@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Redirect
 
 from gateway.anthropic_bridge import router as anthropic_router
 from gateway.v1_sessions import router as v1_sessions_router
-from gateway.hermes_proxy import router as hermes_proxy_router
+from gateway.hermes_proxy import router as hermes_proxy_router, v1_proxy as hermes_v1_proxy
 from gateway.omniroute import router as omniroute_router
 from gateway.ignis import router as ignis_router
 from gateway.claude_rest_api import router as claude_rest_router
@@ -26,20 +26,15 @@ app = FastAPI(
 DASHBOARD_ROOT = Path(os.getenv("HERMES_DASHBOARD_ROOT", "/app/web"))
 
 def _dashboard_index_response(index: Path, request: Request | None) -> HTMLResponse:
-    """Inject the dashboard's runtime base/auth settings without rebuilding it."""
     html = index.read_text(encoding="utf-8")
     token = ""
     auth_required = False
     if request is not None:
         from gateway.webui_api import _auth_enabled, _request_token, _valid_session_token
-
         candidate = _request_token(request)
         if candidate and _valid_session_token(candidate):
             token = candidate
         auth_required = _auth_enabled()
-    # The gateway deliberately keeps the API at /api while the SPA is served
-    # from /dashboard, so the browser client must use the host root for API
-    # and WebSocket URLs.
     base_path = ""
     injected = (
         f'<scr' + f'ipt>window.__HERMES_BASE_PATH__={json.dumps(base_path)};'
@@ -47,21 +42,14 @@ def _dashboard_index_response(index: Path, request: Request | None) -> HTMLRespo
         f'window.__HERMES_AUTH_REQUIRED__={str(auth_required).lower()};</scr' + 'ipt>'
     )
     html = html.replace("</head>", f"{injected}</head>", 1)
-    return HTMLResponse(
-        html,
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, max-age=0"})
 
 @app.middleware("http")
 async def normalize_hermes_paths(request: Request, call_next):
-    # 1. Normalize duplicate slashes (e.g. /hermes//api -> /hermes/api)
     path = request.scope.get("path", "")
     import re
     cleaned_path = re.sub(r"/+", "/", path)
 
-    # 2. If request starts with /hermes/api, /hermes/bootstrap, /hermes/account, /hermes/organizations
-    # strip the leading /hermes prefix so it routes to the Claude REST API router
-    # (Do NOT strip /hermes/v1/messages or /hermes/v1/models which belong to anthropic_bridge)
     if cleaned_path.startswith("/hermes/api/") or cleaned_path == "/hermes/api":
         cleaned_path = cleaned_path[len("/hermes"):]
     elif cleaned_path.startswith("/hermes/bootstrap"):
@@ -92,8 +80,6 @@ async def on_startup():
     except Exception as e:
         print(f"Error starting background agent tasks: {e}")
 
-
-# ── Root & Health ───────────────────────────────────────────────
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return JSONResponse({
@@ -116,11 +102,9 @@ async def root():
         },
     })
 
-
 @app.api_route("/health/live", methods=["GET", "HEAD"])
 async def health_live():
     return JSONResponse({"status": "alive"})
-
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
@@ -139,13 +123,8 @@ async def health_check():
         except Exception as e:
             services[name] = {"status": "starting", "message": str(e)}
     await client.aclose()
-    # Hermex Android treats a 200 response as valid only when the decoded
-    # HealthResponse has status == "ok". Keep the existing diagnostics while
-    # exposing the compatibility field expected by the fixed client.
     return JSONResponse({"status": "ok", "gateway": "healthy", "upstreams": services})
 
-
-# ── PWA Manifest & Static Assets ───────────────────────────────
 @app.api_route("/manifest.json", methods=["GET", "HEAD"])
 @app.api_route("/manifest.webmanifest", methods=["GET", "HEAD"])
 @app.api_route("/site.webmanifest", methods=["GET", "HEAD"])
@@ -160,22 +139,16 @@ async def webmanifest():
         "icons": [{"src": "/static/favicon.png", "sizes": "192x192", "type": "image/png"}],
     })
 
-
 @app.api_route("/dashboard", methods=["GET", "HEAD"])
 @app.api_route("/dashboard/", methods=["GET", "HEAD"])
 async def official_dashboard(request: Request):
     index = DASHBOARD_ROOT / "index.html"
     if not index.exists():
-        return JSONResponse(
-            {"error": "Official Hermes dashboard assets are not installed"},
-            status_code=503,
-        )
+        return JSONResponse({"error": "Official Hermes dashboard assets are not installed"}, status_code=503)
     return _dashboard_index_response(index, request)
-
 
 @app.api_route("/dashboard/{asset_path:path}", methods=["GET", "HEAD"])
 async def official_dashboard_asset(request: Request, asset_path: str):
-    """Serve official Hermes assets and fall back only for SPA deep links."""
     candidate = (DASHBOARD_ROOT / asset_path).resolve()
     root = DASHBOARD_ROOT.resolve()
     if candidate.is_file() and (candidate == root or root in candidate.parents):
@@ -183,15 +156,10 @@ async def official_dashboard_asset(request: Request, asset_path: str):
     index = DASHBOARD_ROOT / "index.html"
     if index.exists():
         return _dashboard_index_response(index, request)
-    return JSONResponse(
-        {"error": "Official Hermes dashboard assets are not installed"},
-        status_code=503,
-    )
-
+    return JSONResponse({"error": "Official Hermes dashboard assets are not installed"}, status_code=503)
 
 @app.api_route("/login", methods=["GET", "HEAD"])
 async def dashboard_login_page():
-    """Small server-side login bridge used by the official dashboard auth flow."""
     if not os.getenv("HERMES_WEBUI_PASSWORD", "").strip():
         return RedirectResponse("/dashboard/", status_code=303)
     script_open = "<scr" + "ipt>"
@@ -214,7 +182,6 @@ if(r.ok) location.assign("/dashboard/"); else document.querySelector("#error").t
         headers={"Cache-Control": "no-store, max-age=0"},
     )
 
-
 @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
 @app.api_route("/favicon.png", methods=["GET", "HEAD"])
 @app.api_route("/static/favicon.png", methods=["GET", "HEAD"])
@@ -222,15 +189,12 @@ if(r.ok) location.assign("/dashboard/"); else document.querySelector("#error").t
 async def favicon():
     return Response(content=b"", status_code=204)
 
-
-# ── Live Runtime Log Inspector ──────────────────────────────────
 LOG_FILES = {
     "gateway": "/data/cache/gateway.log",
     "hermes": "/data/cache/hermes.log",
     "omniroute": "/data/cache/omniroute.log",
     "ignis": "/data/cache/ignis.log",
 }
-
 
 @app.api_route("/logs", methods=["GET", "HEAD"])
 async def logs_viewer():
@@ -265,7 +229,6 @@ h1{color:#58a6ff;font-size:1.2rem;margin:0 0 12px}
     html += "</body></html>"
     return HTMLResponse(content=html)
 
-
 @app.api_route("/logs/{service}", methods=["GET", "HEAD"])
 async def logs_service(service: str):
     path = LOG_FILES.get(service)
@@ -282,10 +245,17 @@ async def logs_service(service: str):
         content = f"(error: {e})"
     return HTMLResponse(f"<pre style='font-family:monospace;background:#0d1117;color:#c9d1d9;padding:16px'>{content}</pre>")
 
+# Critical OpenAI-compatible ingress is registered explicitly instead of
+# depending on the catch-all /v1/{path:path} router.
+@app.api_route(
+    "/v1/chat/completions",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def openai_chat_completions(request: Request):
+    return await hermes_v1_proxy(request, "chat/completions")
 
-# Register routers after the gateway's exact health/static/log routes so the
-# legacy /health catch-all cannot shadow them. Keep WebUI before the legacy
-# /api/models aliases and Hermes proxy last.
+# Register the remaining routers. The Hermes catch-all is last so the
+# explicit OpenAI route above always wins.
 app.include_router(telemetry_router)
 app.include_router(anthropic_router)
 app.include_router(v1_sessions_router)
@@ -297,7 +267,7 @@ app.include_router(ignis_router)
 app.include_router(hermes_proxy_router)
 
 @app.on_event("startup")
-async def on_startup():
+async def on_startup_channels():
     try:
         from gateway import channels_manager
         await channels_manager.start_all_channels()
@@ -305,10 +275,9 @@ async def on_startup():
         print(f"Error starting channels manager: {e}")
 
 @app.on_event("shutdown")
-async def on_shutdown():
+async def on_shutdown_channels():
     try:
         from gateway import channels_manager
         await channels_manager.stop_all_channels()
-    except Exception as e:
+    except Exception:
         pass
-
