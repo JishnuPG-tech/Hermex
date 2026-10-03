@@ -57,5 +57,19 @@ GATEWAY_PID=$!
 sleep 2
 
 # Step 9: Start Nginx Edge Ingress (:7860) in Foreground
+echo "[INIT] Waiting for FastAPI gateway before starting Nginx..."
+for i in $(seq 1 30); do
+    if curl -fsS http://127.0.0.1:8000/api/auth/status >/dev/null 2>&1; then
+        echo "[INIT] FastAPI gateway is ready."
+        break
+    fi
+    sleep 1
+done
+
+if ! curl -fsS http://127.0.0.1:8000/api/auth/status >/dev/null 2>&1; then
+    echo "[FATAL] FastAPI gateway did not become ready within 30 seconds."
+    exit 1
+fi
+
 echo "[INIT] Starting Nginx Edge Ingress on port 7860..."
 exec /usr/sbin/nginx -c /app/nginx.conf
