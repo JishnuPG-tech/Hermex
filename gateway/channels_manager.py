@@ -558,6 +558,9 @@ class TelegramBotService:
         self.task: Optional[asyncio.Task] = None
         self.running = False
         self.last_update_id = 0
+        self.activation_started_at: Optional[str] = None
+        self.activation_last_error: Optional[str] = None
+        self.activation_last_attempt: Optional[int] = None
 
     async def start(self):
         cfg = load_channels_config().get("telegram", {})
@@ -593,7 +596,11 @@ class TelegramBotService:
 
         telegram["enabled"] = True
         telegram["webhook_set"] = False
+        telegram.pop("webhook_activated_at", None)
         save_channels_config(cfg)
+        self.activation_started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.activation_last_error = None
+        self.activation_last_attempt = None
 
         self.running = True
         if self.task and not self.task.done():
@@ -622,6 +629,7 @@ class TelegramBotService:
         await asyncio.sleep(2)
 
         for attempt in range(1, 121):
+            self.activation_last_attempt = attempt
             if not self.running:
                 return
             try:
@@ -646,6 +654,7 @@ class TelegramBotService:
                         )
                         save_channels_config(cfg)
 
+                        self.activation_last_error = None
                         logger.info(
                             f"Telegram Webhook configured successfully: {webhook_url}"
                         )
@@ -660,13 +669,15 @@ class TelegramBotService:
                             )
                         return
 
+                    self.activation_last_error = f"HTTP {r.status_code}: {data}"
                     logger.error(
-                        "Telegram setWebhook failed (attempt %s/10): HTTP %s: %s",
+                        "Telegram setWebhook failed (attempt %s/120): HTTP %s: %s",
                         attempt, r.status_code, data
                     )
             except Exception as e:
+                self.activation_last_error = f"{type(e).__name__}: {e}"
                 logger.error(
-                    "Telegram webhook connection failed (attempt %s/10): %s",
+                    "Telegram webhook connection failed (attempt %s/120): %s",
                     attempt, repr(e)
                 )
 
