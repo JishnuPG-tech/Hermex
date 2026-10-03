@@ -61,11 +61,14 @@ jobs:
       - name: Commit and push to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GIT_LFS_SKIP_PUSH: "1"
         run: |
           set -euxo pipefail
           cd /tmp/hf-space
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config lfs.allowincompletepush true
+
           git add -A
           git status --short
 
@@ -77,8 +80,7 @@ jobs:
           git diff --cached --stat
           git commit -m "Sync Hermex from GitHub ${GITHUB_SHA}"
 
-          # Git LFS files are deliberately excluded from this mirror.
-          # Remove the LFS pre-push hook so old missing objects are not re-uploaded.
+          # This mirror intentionally updates only non-LFS files.
           rm -f .git/hooks/pre-push
 
-          git push origin HEAD:main
+          GIT_LFS_SKIP_PUSH=1 git push --no-verify origin HEAD:main
