@@ -1,10 +1,12 @@
 name: Sync to Hugging Face Space
 
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+# DISABLED: Automated sync to Hugging Face Space disabled to prevent overwriting OpenDots integration
+# on:
+#   push:
+#     branches:
+#       - main
+#   workflow_dispatch:
+on: []
 
 permissions:
   contents: read
